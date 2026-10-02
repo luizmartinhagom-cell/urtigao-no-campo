@@ -1,0 +1,17 @@
+{
+  "name": "Urtigão no Campo",
+  "short_name": "Urtigão",
+  "description": "Avaliação de materiais de soja — protocolos, campos de difusão, chuva e estatística.",
+  "lang": "pt-BR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0E2318",
+  "theme_color": "#0E2318",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
