@@ -852,7 +852,7 @@ function proximaAvaliacao(campo){
    6c) RANKING DE PRODUTIVIDADE DENTRO DE UM ÚNICO CAMPO
 ------------------------------------------------------------------*/
 function rankingCampo(campo){
-  const materiais = materiaisAtivos(campo).filter(m=>m.colheita?.pesoColhidoKg);
+  const materiais = materiaisEstat(campo).filter(m=>m.colheita?.pesoColhidoKg);
   const linhas = materiais.map(m=>{
     const r = materialResumo(campo, m);
     return { nome: m.nome||'(sem nome)', scHa: r.produtividadeScHa, pmsG: r.pmsG, umidadePct: r.umidadePct, populacaoFinalHa: r.populacaoFinalHa };
@@ -1274,7 +1274,9 @@ async function salvarMaterial(campo, materialId, patch){
     toast("Este campo foi criado por outro consultor — edição bloqueada.");
     return;
   }
-  const materiais = (campo.materiais||[]).map(m => m.id===materialId ? Object.assign({}, m, patch) : m);
+  // usa a versão mais recente do campo (evita apagar algo salvo depois que a tela abriu)
+  const atual = STATE.campos.find(c=>c.id===campo.id) || campo;
+  const materiais = (atual.materiais||[]).map(m => m.id===materialId ? Object.assign({}, m, patch) : m);
   await salvarCampo(campo.id, { materiais });
 }
 
@@ -1653,6 +1655,11 @@ function materiaisAtivos(campo){
     .map(m=>({ m, numero:numeroMaterial(campo,m), nome:m.nome }))
     .sort(compararPorNumero)
     .map(x=>x.m);
+}
+// Materiais que entram na ESTATÍSTICA FINAL (ranking, médias, Tukey, estabilidade,
+// L×L e PDFs de resultado). "Fora da estatística" continua no campo, com tudo lançado.
+function materiaisEstat(campo){
+  return materiaisAtivos(campo).filter(m=>!m.foraEstatistica);
 }
 function rotuloMaterial(campo, mat){
   const n = numeroMaterial(campo, mat);
@@ -2358,7 +2365,7 @@ function renderResultados(){
   let corpo = '';
   if(!vista){
     // ---- Painel: resumo + um bloco para cada análise ----
-    const mediaGeral = media(campos.flatMap(c=>materiaisAtivos(c).map(m=>V.get(c,m)).filter(v=>v!=null && !isNaN(v))));
+    const mediaGeral = media(campos.flatMap(c=>materiaisEstat(c).map(m=>V.get(c,m)).filter(v=>v!=null && !isNaN(v))));
     const lider = stats[0];
     const comDados = campos.filter(c=>statsVar([c], varKey).length);
     const nEpocas = new Set(comDados.map(c=>quinzenaPlantio(c.dataPlantio).k)).size;
@@ -2391,7 +2398,7 @@ function renderResultados(){
     const anova = anovaVar(campos, varKey);
     const letraDe = nome => anova ? (anova.ranking.find(r=>r.nome===nome)?.letra||'') : '';
     const todos = stats.flatMap(s=>Array(s.n).fill(0)).length;
-    const mediaGeral = media(campos.flatMap(c=>materiaisAtivos(c).map(m=>VARS[varKey].get(c,m)).filter(v=>v!=null && !isNaN(v))));
+    const mediaGeral = media(campos.flatMap(c=>materiaisEstat(c).map(m=>VARS[varKey].get(c,m)).filter(v=>v!=null && !isNaN(v))));
     const max = Math.max(...stats.map(s=>s.media)), min0 = varKey==='ciclo' ? Math.min(...stats.map(s=>s.media))*0.9 : 0;
     const W = v => max>min0 ? (v-min0)/(max-min0)*100 : 0;
     corpo = `
@@ -3321,7 +3328,7 @@ function renderCampoDetail(){
       ${editavel && !ehDifusao(campo) ? `<button class="btn btn-sm btn-primary grow" id="btnSelecionarMateriais">🌱 Materiais do campo</button>` : ""}
       ${editavel && ehDifusao(campo) ? `<button class="btn btn-sm btn-primary grow" id="btnAddMaterialDifusao">+ Adicionar material</button>` : ""}
       <button class="btn btn-sm btn-yellow" id="btnCroqui">📐 Croqui do plantio (PDF)</button>
-      <button class="btn btn-sm" id="btnRelatorioCampo">📄 Relatório (PDF)</button>
+      <button class="btn btn-sm" id="btnRelatorioCampo">📄 PDF final da colheita</button>
     </div>
     <div id="listaMateriais"></div>
   `;
@@ -3667,6 +3674,7 @@ function materialRowHTML(campo, mat){
         <div class="campo-material">${esc(rotuloMaterial(campo, mat))}</div>
         <span class="badge ${etapa.cls}">${etapa.label}</span>
       </div>
+      ${mat.foraEstatistica ? `<div style="margin:4px 0;"><span class="badge badge-danger">🚫 Fora da estatística final</span></div>` : ''}
       <div class="progress-track"><div class="progress-fill" style="width:${etapa.progress}%"></div></div>
       <div class="campo-meta">
         ${mat.numeroLinhas ? `<span>🚜 ${fmtInt(mat.numeroLinhas)} linhas</span>` : ""}
@@ -4541,6 +4549,132 @@ const TABS_DIFUSAO = [
 ];
 function tabsDoCampo(campo){ return ehDifusao(campo) ? TABS_DIFUSAO : TABS_MATERIAL; }
 
+/* ---------- Editar material depois de lançado (nome, nº, linhas, sementes,
+   comprimento e se entra na estatística final). Avaliações não são tocadas. ---------- */
+function abrirModalEditarMaterial(campo, mat){
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  mat = (campo.materiais||[]).find(m=>m.id===mat.id) || mat;
+  const nAtual = numeroMaterial(campo, mat);
+  const compPadrao = num(campo.comprimentoPadraoM);
+  openModal(`
+    <h3>✏️ Editar material</h3>
+    <p class="field-hint" style="margin-bottom:10px;">${esc(campo.fazenda||'')} · as avaliações já lançadas (estande, notas, colheita, fotos) continuam salvas.</p>
+    <div class="grid2">
+      <div class="field"><label>Nº</label><input id="em_num" type="number" inputmode="numeric" step="1" value="${nAtual??''}"></div>
+      <div class="field"><label>Linhas plantadas</label><input id="em_linhas" type="number" inputmode="numeric" step="1" value="${mat.numeroLinhas??''}"></div>
+    </div>
+    <div class="field"><label>Nome do material</label><input id="em_nome" value="${esc(mat.nome||'')}"></div>
+    <div class="grid2">
+      <div class="field"><label>Sementes por metro</label><input id="em_sem" type="number" step="any" inputmode="decimal" value="${mat.sementesPorMetro??''}"></div>
+      <div class="field"><label>Comprimento (m)</label><input id="em_comp" type="number" step="any" inputmode="decimal" value="${mat.comprimentoM??''}" placeholder="${compPadrao>0?'Padrão: '+fmt(compPadrao,0)+' m':''}"></div>
+    </div>
+    <div class="card" style="padding:10px 12px;margin:6px 0 10px;">
+      <label class="hstack" style="gap:10px;font-size:14px;align-items:flex-start;">
+        <input type="checkbox" id="em_estat" ${mat.foraEstatistica?'':'checked'} style="width:20px;height:20px;margin-top:1px;">
+        <span><b>Considerar na estatística final</b><br><span class="field-hint" style="margin:0;">Desmarque para tirar este material do ranking, médias, Tukey, estabilidade, L × L e dos PDFs de resultado (ex.: parcela com problema, acamou, falha de plantio). Nada é apagado.</span></span>
+      </label>
+      <div class="field" id="em_motivoBox" style="margin:8px 0 0;${mat.foraEstatistica?'':'display:none;'}"><label>Motivo (opcional)</label><input id="em_motivo" value="${esc(mat.motivoForaEstat||'')}" placeholder="Ex: parcela com falha de plantio"></div>
+    </div>
+    <button class="btn btn-primary btn-block" id="em_salvar">Salvar alterações</button>
+    <button class="btn btn-block" style="margin-top:8px;" id="em_cancelar">Cancelar</button>
+  `);
+  const chk = document.getElementById('em_estat');
+  chk.addEventListener('change', ()=>{ document.getElementById('em_motivoBox').style.display = chk.checked ? 'none' : ''; });
+  document.getElementById('em_cancelar').addEventListener('click', closeModal);
+  document.getElementById('em_salvar').addEventListener('click', async ()=>{
+    const nome = document.getElementById('em_nome').value.trim();
+    if(!nome){ toast("Informe o nome do material"); return; }
+    const c = STATE.campos.find(x=>x.id===campo.id) || campo;
+    if((c.materiais||[]).some(m=>m.id!==mat.id && m.status!=='excluido' && normNome(m.nome)===normNome(nome))){ toast("Já existe outro material com esse nome neste campo"); return; }
+    const numDig = num(document.getElementById('em_num').value);
+    const patch = {
+      nome,
+      numeroLinhas: num(document.getElementById('em_linhas').value) || null,
+      sementesPorMetro: num(document.getElementById('em_sem').value) || null,
+      comprimentoM: num(document.getElementById('em_comp').value) || null,
+      foraEstatistica: !chk.checked,
+      motivoForaEstat: chk.checked ? null : (document.getElementById('em_motivo').value.trim() || null)
+    };
+    // nº: no protocolo vem da lista padrão pelo nome; se o nome não estiver na
+    // lista (ou o nº digitado for diferente), guarda o nº no próprio material
+    const nCat = ehDifusao(c) ? null : numeroCatalogo(nome);
+    const nNovo = isNaN(numDig) ? null : Math.round(numDig);
+    if(ehDifusao(c) || nCat==null || (nNovo!=null && nNovo!==nCat)) patch.numero = nNovo;
+    await salvarMaterial(c, mat.id, patch);
+    closeModal();
+    toast("Material atualizado ✓");
+    renderAll();
+  });
+}
+
+/* ---------- Fotos das avaliações (qualquer etapa) ----------
+   Ficam na coleção fotos_urtigao com campoId, materialId e etapa — fora do
+   documento do campo, então anexar uma foto não apaga o que está sendo
+   digitado na tela e não pesa no limite de 1 MB do campo. */
+const ETAPA_FOTO_LABEL = { estande:'Estande', engalhamento:'Engalhamento', sanidadeAltura:'Sanidade / altura', colheita:'Colheita' };
+async function listarFotosAvaliacao(campoId, materialId){
+  if(!STATE.db) return (STATE.fotosAvalLocal||[]).filter(f=>f.materialId===materialId);
+  try{
+    const snap = await STATE.db.collection(FOTOS_COLLECTION).where('materialId','==',materialId).get();
+    return snap.docs.map(d=>({ id:d.id, ...d.data() })).filter(f=>f.etapa && f.campoId===campoId)
+      .sort((a,b)=>(a.criadoEm||'').localeCompare(b.criadoEm||''));
+  }catch(e){ console.error(e); return []; }
+}
+function anexarBlocoFotos(container, campo, mat, etapa, editavel){
+  if(!container) return;
+  const box = document.createElement('div');
+  box.className = 'card vstack fotos-aval';
+  box.style.marginTop = '12px';
+  box.innerHTML = `
+    <div class="hstack" style="justify-content:space-between;align-items:center;">
+      <div class="section-title" style="margin:0;">📷 Fotos do material</div>
+      ${editavel ? `<label class="btn btn-sm btn-yellow" style="margin:0;cursor:pointer;">＋ Foto<input type="file" accept="image/*" multiple class="fa-input" style="display:none;"></label>` : ''}
+    </div>
+    <div class="field-hint" style="margin:0;">Salvas na hora, separadas por etapa — não precisa tocar em Salvar.</div>
+    <div class="fa-grid" style="display:flex;flex-wrap:wrap;gap:8px;"><span class="field-hint">Carregando...</span></div>`;
+  container.appendChild(box);
+  const grid = box.querySelector('.fa-grid');
+  let fotos = [];
+  const desenhar = async ()=>{
+    fotos = await listarFotosAvaliacao(campo.id, mat.id);
+    if(!box.isConnected) return;
+    if(!fotos.length){ grid.innerHTML = `<span class="field-hint" style="margin:0;">Nenhuma foto ainda.</span>`; return; }
+    const ordem = ['estande','engalhamento','sanidadeAltura','colheita'];
+    fotos.sort((a,b)=> (a.etapa===etapa?-1:0)-(b.etapa===etapa?-1:0) || ordem.indexOf(a.etapa)-ordem.indexOf(b.etapa));
+    grid.innerHTML = fotos.map((f,i)=>`
+      <div style="position:relative;width:84px;">
+        <img data-faver="${i}" src="${f.base64}" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:2px solid ${f.etapa===etapa?'var(--green)':'var(--line)'};cursor:pointer;">
+        <div style="font-size:10.5px;color:var(--ink-soft);line-height:1.2;margin-top:2px;">${esc(ETAPA_FOTO_LABEL[f.etapa]||f.etapa)}<br>${f.criadoEm?fmtDate(f.criadoEm.slice(0,10)):''}</div>
+        ${editavel ? `<button type="button" data-farm="${i}" style="position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:999px;background:var(--danger);color:#fff;border:none;font-size:12px;line-height:1;">✕</button>` : ''}
+      </div>`).join('');
+    grid.querySelectorAll('[data-faver]').forEach(img=>img.addEventListener('click', ()=>abrirLightboxFotos([{ base64: fotos[+img.dataset.faver].base64 }])));
+    grid.querySelectorAll('[data-farm]').forEach(b=>b.addEventListener('click', async ()=>{
+      if(!confirm('Apagar esta foto?')) return;
+      const f = fotos[+b.dataset.farm];
+      if(STATE.db && f.id) gravarSemEsperar(STATE.db.collection(FOTOS_COLLECTION).doc(f.id).delete());
+      else STATE.fotosAvalLocal = (STATE.fotosAvalLocal||[]).filter(x=>x!==f);
+      toast("Foto apagada"); desenhar();
+    }));
+  };
+  const inp = box.querySelector('.fa-input');
+  if(inp) inp.addEventListener('change', async ()=>{
+    const files = Array.from(inp.files||[]); if(!files.length) return;
+    toast(files.length>1 ? `Salvando ${files.length} fotos...` : "Salvando foto...");
+    for(const file of files){
+      try{
+        const base64 = await comprimirImagem(file);
+        const reg = { base64, campoId:campo.id, materialId:mat.id, material:mat.nome||null, etapa, consultor:STATE.consultor||null, criadoEm:new Date().toISOString() };
+        if(STATE.db) gravarSemEsperar(STATE.db.collection(FOTOS_COLLECTION).doc().set(reg));
+        else (STATE.fotosAvalLocal = STATE.fotosAvalLocal||[]).push(reg);
+      }catch(e){ console.error(e); toast("Não foi possível processar uma foto"); }
+    }
+    inp.value = '';
+    toast("Foto salva ✓");
+    setTimeout(desenhar, 150);
+  });
+  desenhar();
+}
+
 function renderMaterialDetail(){
   const campo = STATE.campos.find(c=>c.id===STATE.campoAbertoId);
   const el = document.getElementById('view-material');
@@ -4556,8 +4690,9 @@ function renderMaterialDetail(){
         <h1 style="margin-bottom:2px;">${esc(rotuloMaterial(campo, mat))}</h1>
         <div class="campo-sub">${esc(campo.fazenda||'—')} · ${esc(campo.produtor||'—')} · ${esc(campo.safra||'—')}</div>
       </div>
-      ${editavel ? `<button class="btn btn-sm btn-danger" id="btnExcluirMaterial">Excluir</button>` : `<span class="badge badge-implantacao">Leitura</span>`}
+      ${editavel ? `<div class="hstack" style="gap:6px;flex:none;"><button class="btn btn-sm" id="btnEditarMaterial">✏️ Editar</button><button class="btn btn-sm btn-danger" id="btnExcluirMaterial">Excluir</button></div>` : `<span class="badge badge-implantacao">Leitura</span>`}
     </div>
+    ${mat.foraEstatistica ? `<div class="field-hint" style="background:#fdeeee;border-radius:10px;padding:8px 10px;margin-bottom:10px;color:var(--ink);">🚫 <b>Fora da estatística final</b>${mat.motivoForaEstat?` — ${esc(mat.motivoForaEstat)}`:''}. Os dados continuam salvos, só não entram no ranking, médias e PDFs de resultado. Toque em ✏️ Editar para incluir de volta.</div>` : ''}
     <div class="tabs" id="tabsBarMat">
       ${tabsDoCampo(campo).map(t=>`
         <button class="tab ${STATE.tabAtiva===t.key?'active':''} ${tabTemDadosMaterial(mat,t.key,campo)?'done':''}" data-tab="${t.key}">
@@ -4569,6 +4704,7 @@ function renderMaterialDetail(){
 
   document.getElementById('btnVoltarCampo').addEventListener('click', voltarCampo);
   if(editavel){
+    document.getElementById('btnEditarMaterial').addEventListener('click', ()=>abrirModalEditarMaterial(campo, mat));
     document.getElementById('btnExcluirMaterial').addEventListener('click', ()=>{
       pedirSenha("Excluir material", `Excluir o material <b>${esc(mat.nome||'sem nome')}</b> deste campo, com todas as avaliações? Não tem como desfazer.`, "Excluir material")
         .then(ok=>{ if(ok) excluirMaterial(campo, mat.id); });
@@ -4614,6 +4750,8 @@ function renderTabContentMaterial(campo, mat, editavel){
   else if(STATE.tabAtiva==="sanidadeAltura") wrap.innerHTML = tplSanidadeAltura(mat, editavel);
   else if(STATE.tabAtiva==="colheita") wrap.innerHTML = tplColheita(campo, mat, editavel);
   wireTabEventsMaterial(campo, mat, editavel);
+  anexarBlocoFotos(wrap, campo, mat, STATE.tabAtiva, editavel);
+  { const bp = wrap.querySelector('#btnPdfColheitaFinal'); if(bp) bp.addEventListener('click', ()=>abrirModalRelatorioCampo(STATE.campos.find(c=>c.id===campo.id)||campo)); }
 }
 
 /* ---------- TAB 1 — ESTANDE (parcela + população inicial) ---------- */
@@ -4821,6 +4959,7 @@ function tplColheita(campo, mat, editavel){
       <div class="field"><label>Observações da colheita</label><textarea ${dis} id="c_obs" placeholder="Condições no momento da colheita, perdas, etc.">${esc(co.observacoes||'')}</textarea></div>
 
       ${editavel?`<button class="btn btn-primary btn-block" id="btnSalvarColheita" style="margin-top:6px;">Salvar colheita</button>`:''}
+      <button type="button" class="btn btn-yellow btn-block" id="btnPdfColheitaFinal" style="margin-top:8px;">📄 PDF final da colheita (campo inteiro)</button>
     </div>
   `;
 }
@@ -5286,6 +5425,8 @@ function wireLancMateriaisList(campo, mats, etapa, editavel){
     if(wrap){
       wrap.innerHTML = tplEtapaLancamento(campo, abertoMat, etapa, editavel);
       wireEtapaLancamento(campo, abertoMat, etapa, editavel);
+      anexarBlocoFotos(wrap, campo, abertoMat, etapa.key, editavel);
+      { const bp = wrap.querySelector('#btnPdfColheitaFinal'); if(bp) bp.addEventListener('click', ()=>abrirModalRelatorioCampo(STATE.campos.find(c=>c.id===campo.id)||campo)); }
     }
   }
 }
@@ -5362,7 +5503,7 @@ function materialResumo(campo, mat){
 
 function todasLinhasResumo(campos){
   const linhas = [];
-  campos.forEach(campo=>materiaisAtivos(campo).forEach(mat=>linhas.push(materialResumo(campo,mat))));
+  campos.forEach(campo=>materiaisEstat(campo).forEach(mat=>linhas.push(materialResumo(campo,mat))));
   return linhas;
 }
 
@@ -5372,7 +5513,7 @@ function todasLinhasResumo(campos){
 function statsPorMaterial(campos){
   const grupos = {};
   campos.forEach(campo=>{
-    materiaisAtivos(campo).forEach(mat=>{
+    materiaisEstat(campo).forEach(mat=>{
       if(!mat.nome) return;
       const r = materialResumo(campo, mat);
       if(!grupos[mat.nome]) grupos[mat.nome] = { nome: mat.nome, scHaList:[], estabList:[], notaEngList:[], notaSanList:[], notaAcamList:[], locais:new Set() };
@@ -5547,7 +5688,7 @@ function tabelaMatLocal(campos, varKey){
   const get = VARS[varKey].get, tab = {}, locais = [];
   campos.forEach(c=>{
     let tem = false;
-    materiaisAtivos(c).forEach(m=>{
+    materiaisEstat(c).forEach(m=>{
       if(!m.nome) return;
       const v = get(c, m);
       if(v==null || isNaN(v)) return;
@@ -5936,7 +6077,7 @@ function exportarPDF(campos){
 function abrirModalRelatorioCampo(campo){
   const linhas = rankingCampo(campo);
   openModal(`
-    <h3>📄 Relatório do campo</h3>
+    <h3>📄 PDF final da colheita</h3>
     <p class="field-hint" style="margin-bottom:10px;">Gera um PDF só deste campo/ensaio: ranking de produtividade, PMS, umidade e população final de cada material colhido.</p>
     ${linhas.length===0?`<div class="field-hint" style="color:var(--danger);margin-bottom:8px;">Nenhum material colhido ainda neste campo — o relatório fica mais completo depois da colheita, mas ainda é possível gerar com os dados disponíveis.</div>`:''}
     <div class="field">
@@ -5980,12 +6121,12 @@ function gerarRelatorioCampoPDF(campo, opts){
 
   doc.setFontSize(16);
   doc.setTextColor(11,89,48);
-  doc.text(`Relatório do campo: ${campo.fazenda||'(sem nome)'}`, 30, Y0);
+  doc.text(`Resultado final da colheita: ${campo.fazenda||'(sem nome)'}`, 30, Y0);
   doc.setFontSize(9);
   doc.setTextColor(90,107,98);
   doc.text(`Produtor: ${campo.produtor||'—'} · Safra: ${campo.safra||'—'} · Gerado em ${new Date().toLocaleString('pt-BR')}`, 30, Y0+16);
   const culturaAntecessoraTxt = campo.culturaAntecessora==='Outros' ? (campo.culturaAntecessoraOutra||'Outros') : (campo.culturaAntecessora||'—');
-  doc.text(`Cultura antecessora: ${culturaAntecessoraTxt} · Potencial produtivo: ${labelPotencialProdutivo(campo.potencialProdutivo)||'—'}`, 30, Y0+28);
+  doc.text(`Plantio: ${campo.dataPlantio?fmtDate(campo.dataPlantio):'—'} · Cultura antecessora: ${culturaAntecessoraTxt} · Potencial produtivo: ${labelPotencialProdutivo(campo.potencialProdutivo)||'—'}`, 30, Y0+28);
 
   const cols = ["#","Material","Produtividade (sc/ha)","PMS (g)","Umidade %","População final (plantas/ha)"];
   const rows = linhas.map((l,i)=>[
@@ -6005,6 +6146,17 @@ function gerarRelatorioCampoPDF(campo, opts){
   });
 
   let yChuva = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 100) + 22;
+  if(linhas.length){
+    doc.setFontSize(9.5); doc.setTextColor(11,89,48); doc.setFont(undefined,'bold');
+    doc.text(`Média do campo: ${fmt(media(linhas.map(l=>l.scHa)),1)} sc/ha · ${linhas.length} material(is) na estatística`, 30, yChuva);
+    doc.setFont(undefined,'normal'); yChuva += 16;
+  }
+  const foraEst = materiaisAtivos(campo).filter(m=>m.foraEstatistica);
+  if(foraEst.length){
+    doc.setFontSize(8.5); doc.setTextColor(150,60,60);
+    doc.text(doc.splitTextToSize(`Fora da estatística final: ${foraEst.map(m=>m.nome+(m.motivoForaEstat?` (${m.motivoForaEstat})`:'')).join('; ')}`, 780), 30, yChuva);
+    yChuva += 18;
+  }
   if((campo.chuvas||[]).length){
     if(yChuva > 520){ doc.addPage(); yChuva = Y0; }
     doc.setFontSize(10); doc.setTextColor(11,89,48); doc.setFont(undefined,'bold');
@@ -6033,7 +6185,7 @@ function gerarRelatorioCampoPDF(campo, opts){
     doc.text("Data", 400, y+14);
   }
 
-  const nomeArquivo = `relatorio_campo_${(campo.fazenda||'campo').replace(/[^a-z0-9]+/gi,'_')}_${todayISO()}.pdf`;
+  const nomeArquivo = `resultado_colheita_${(campo.fazenda||'campo').replace(/[^a-z0-9]+/gi,'_')}_${todayISO()}.pdf`;
   rodapePDF(doc);
   doc.save(nomeArquivo);
   toast("Relatório do campo gerado ✓");
