@@ -355,6 +355,19 @@ details.cat-det>summary{cursor:pointer;font-size:13px;font-weight:700;color:var(
 .inst-banner{justify-content:space-between;gap:10px;background:var(--green-dark);color:#fff;border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:13px;}
 .passos-inst{margin:4px 0 6px;padding-left:20px;font-size:13.5px;line-height:1.55;}
 .tabela-desc-box{margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;}
+.cv-chip{padding:5px 10px;font-size:13px;}
+.tol-list{display:flex;flex-direction:column;gap:8px;}
+.tol-item{border:1px solid var(--line,#e3e8e5);border-left:5px solid #c9d3ce;border-radius:12px;padding:10px 12px;background:#fff;}
+.tol-item.tol-ok{border-left-color:var(--green);background:var(--green-light);}
+.tol-item.tol-atencao{border-left-color:#E0A800;background:#fff9e6;}
+.tol-item.tol-ruim{border-left-color:var(--danger);background:#fdeeee;}
+.tol-top{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px;}
+.tol-item>b{display:block;font-size:20px;margin:2px 0;}
+.tol-item small{display:block;font-size:12px;color:var(--ink-soft);line-height:1.35;margin-top:2px;}
+.fonte-row{display:grid;grid-template-columns:1.6fr 1fr 0.9fr;gap:6px;margin-bottom:6px;}
+.fonte-row input{width:100%;min-width:0;padding:8px 8px;border:1.5px solid var(--line);border-radius:8px;font-size:14px;}
+.fonte-row input[readonly]{background:var(--bg);color:var(--ink);}
+.fonte-head{font-size:11.5px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;margin-bottom:2px;}
 .footer-note{text-align:center;font-size:11px;color:var(--ink-soft);padding:18px 0 6px;}
 
 </style>
@@ -2618,10 +2631,25 @@ const FERR_TPL = {
   cv: ()=>`
     ${chipsHTML('data-cvcult',[['soja','Soja'],['milho','Milho']],'soja')}
     <div class="grid2">${campoNum('cv_sem','Sementes por metro (regulagem)',14)}${campoNum('cv_esp','Espaçamento (cm)',45)}</div>
-    <div class="field"><label>Distâncias entre plantas vizinhas (cm)</label>
-      <textarea id="cv_dist" inputmode="decimal" placeholder="Ex: 7 6.5 8 3 7 12 6 7.5 ..."></textarea>
-      <div class="field-hint">Meça planta a planta numa sequência da linha (mínimo 20 medidas).</div></div>
+    <div class="field"><label>Distância entre plantas vizinhas (cm)</label>
+      <div class="hstack">
+        <input id="cv_val" type="text" inputmode="decimal" placeholder="Ex: 7,5" autocomplete="off" style="flex:1;min-width:0;">
+        <button type="button" class="btn btn-primary" id="cv_add" style="flex:none;">＋ Adicionar</button>
+      </div>
+      <div class="field-hint">Meça planta a planta numa sequência da linha e adicione uma medida de cada vez (mínimo 20). Toque numa medida para apagar.</div></div>
+    <div class="hstack" style="justify-content:space-between;margin-bottom:4px;"><b id="cv_n" style="font-size:13px;"></b><button type="button" class="btn btn-sm btn-ghost" id="cv_limpar" style="padding:2px 0;color:var(--danger);">Limpar</button></div>
+    <div id="cv_lista" class="chip-select" style="margin-bottom:10px;"></div>
     <div id="cv_res"></div>`,
+  fontes: ()=>`
+    ${chipsHTML('data-focult',[['soja','Soja'],['milho','Milho']],'soja')}
+    <div class="grid2">${campoNum('fo_prod','Produtividade esperada (sc/ha)',PRODUT_PADRAO.soja)}${campoNum('fo_saca','Preço da saca (R$) — opcional','','placeholder="Ex: 120"')}</div>
+    <div class="field"><label>Necessidade de nutrientes</label>${chipsHTML('data-fobase',[['export','Repor o que sai nos grãos'],['manual','Digitar a dose (kg/ha)']],'export')}</div>
+    <div class="grid2" id="fo_manBox" style="display:none;">${campoNum('fo_p','P₂O₅ (kg/ha)',90)}${campoNum('fo_k','K₂O (kg/ha)',90)}</div>
+    <div class="section-title">Fontes e preços (R$ por tonelada)</div>
+    <div class="fonte-row fonte-head"><span>Fonte</span><span>N-P-K</span><span>R$/t</span></div>
+    <div id="fo_fontes"></div>
+    <div class="fonte-row"><input class="fo-nome" value="Cloreto de potássio (KCl)" readonly><input class="fo-form" value="00-00-60" readonly><input class="fo-preco" id="fo_kcl" placeholder="R$/t" type="number" inputmode="decimal"></div>
+    <div id="fo_res" style="margin-top:10px;"></div>`,
   pulverizador: ()=>`
     <div class="grid2">${campoNum('pv_taxa','Taxa de aplicação (L/ha)',100)}${campoNum('pv_vel','Velocidade (km/h)',12)}</div>
     <div class="grid2">${campoNum('pv_esp','Espaçamento entre bicos (cm)',50)}${campoNum('pv_tanque','Tanque (L)',2000)}</div>
@@ -2807,28 +2835,130 @@ const FERR_WIRE = {
   },
   cv(){
     let cult = 'soja';
+    const vals = STATE.cvValores || (STATE.cvValores = []);
+    const lista = ()=>{
+      document.getElementById('cv_lista').innerHTML = vals.length
+        ? vals.map((v,i)=>`<button type="button" class="chip-opt cv-chip" data-cvrm="${i}" title="Toque para apagar">${fmt(v, v%1?1:0)}</button>`).join('')
+        : '<span class="field-hint">Nenhuma medida ainda.</span>';
+      document.getElementById('cv_n').textContent = `${vals.length} medida(s)`;
+      document.querySelectorAll('[data-cvrm]').forEach(b=>b.addEventListener('click', ()=>{ vals.splice(+b.dataset.cvrm,1); lista(); calc(); }));
+    };
+    const adicionar = ()=>{
+      const inp = document.getElementById('cv_val');
+      // aceita várias de uma vez separadas por espaço, ";" ou "/" — a vírgula é decimal
+      const novos = String(inp.value).split(/[\s;\/]+/).map(x=>num(x)).filter(v=>!isNaN(v) && v>0);
+      if(!novos.length){ toast("Digite a distância em cm"); inp.focus(); return; }
+      vals.push(...novos); inp.value = ''; inp.focus(); lista(); calc();
+    };
     const calc = ()=>{
       const sem = ferrNum('cv_sem'), esp = ferrNum('cv_esp');
-      const d = parseListaNumeros(document.getElementById('cv_dist').value);
+      const d = vals.slice();
       const box = document.getElementById('cv_res');
       const xref = sem>0 ? 100/sem : NaN;
-      if(d.length<2){ box.innerHTML = resultadoHTML([[!isNaN(xref)?fmt(xref,1)+' cm':'—','Distância ideal entre plantas'],[sem>0&&esp>0?fmtInt(calcPopTeoricaHa(sem,esp))+'/ha':'—','População teórica']]); return; }
+      if(d.length<2){ box.innerHTML = resultadoHTML([[!isNaN(xref)?fmt(xref,1)+' cm':'—','Distância ideal entre plantas'],[sem>0&&esp>0?fmtInt(calcPopTeoricaHa(sem,esp))+'/ha':'—','População teórica']]) + `<div class="field-hint" style="margin-top:6px;">Adicione pelo menos 2 medidas para calcular o CV (o ideal é 20 ou mais).</div>`; return; }
       const m = media(d), sd = desvioPadrao(d,m), cv = sd/m*100;
       const duplos = d.filter(x=>x<0.5*xref).length, falhos = d.filter(x=>x>1.5*xref).length, aceit = d.length-duplos-falhos;
       const pA = aceit/d.length*100, pD = duplos/d.length*100, pF = falhos/d.length*100;
-      const cl = pA>=90?['ok','Ótimo']:pA>=75?['ok','Bom']:pA>=50?['atencao','Regular']:['ruim','Insatisfatório'];
+      const plM = 100/m, efic = sem>0 ? plM/sem*100 : NaN;
+      const nivelA = pA>=90?['ok','Ótimo']:pA>=75?['ok','Bom']:pA>=50?['atencao','Regular']:['ruim','Ruim'];
+      const nivel3 = (v, a, b)=> v<=a ? ['ok','Aceitável'] : v<=b ? ['atencao','Atenção'] : ['ruim','Ruim'];
+      const nF = nivel3(pF,5,10), nD = nivel3(pD,5,10), nCV = nivel3(cv,30,50);
+      const nE = isNaN(efic) ? null : efic>=90 ? ['ok','Aceitável'] : efic>=80 ? ['atencao','Atenção'] : ['ruim','Ruim'];
+      const badge = n => `<span class="badge ${n[0]==='ok'?'badge-colheita':n[0]==='atencao'?'badge-implantacao':'badge-danger'}">${n[0]==='ok'?'✅':n[0]==='atencao'?'⚠️':'❌'} ${n[1]}</span>`;
+      const tolItem = (nome, val, tol, n)=>`<div class="tol-item tol-${n[0]}"><div class="tol-top"><span>${nome}</span>${badge(n)}</div><b>${val}</b><small>Tolerância: ${tol}</small></div>`;
+      const geral = [nivelA,nF,nD,nCV].some(n=>n[0]==='ruim') ? 'ruim' : [nivelA,nF,nD,nCV].some(n=>n[0]==='atencao') ? 'atencao' : 'ok';
       box.innerHTML = `
-        ${resultadoHTML([[fmt(cv,1)+'%','CV das distâncias'],[fmt(100/m,1)+' pl/m','Plantas por metro'],[esp>0?fmtInt(100/m*10000/(esp/100))+'/ha':'—','População estimada'],[fmt(m,1)+' cm','Distância média (ideal '+fmt(xref,1)+')']])}
-        <div style="margin-top:8px;">${veredito(cl[0], `Distribuição <b>${cl[1]}</b> — ${fmt(pA,0)}% dos espaçamentos aceitáveis.`)}</div>
+        <div class="destaque"><span>CV das distâncias entre plantas</span><b>${fmt(cv,1)}%</b><span>${d.length} medidas · média ${fmt(m,1)} cm (ideal ${fmt(xref,1)} cm)</span></div>
+        ${veredito(geral, geral==='ok' ? 'Plantio <b>dentro do aceitável</b>.' : geral==='atencao' ? 'Plantio <b>no limite</b> — confira os itens em atenção.' : 'Plantio <b>fora do aceitável</b> — revise velocidade, disco/anel, vácuo e regulagem.')}
+        <div class="tol-list" style="margin-top:8px;">
+          ${tolItem('Espaçamentos aceitáveis', fmt(pA,0)+'%', '≥ 90% ótimo · 75–90% bom · 50–75% regular · &lt; 50% ruim', nivelA)}
+          ${tolItem('Falhas (&gt; '+fmt(1.5*xref,1)+' cm)', fmt(pF,0)+'%', 'até 5% aceitável · 5–10% atenção · &gt; 10% ruim', nF)}
+          ${tolItem('Duplas (&lt; '+fmt(0.5*xref,1)+' cm)', fmt(pD,0)+'%', 'até 5% aceitável · 5–10% atenção · &gt; 10% ruim', nD)}
+          ${tolItem('CV das distâncias', fmt(cv,1)+'%', 'até 30% aceitável · 30–50% atenção · &gt; 50% ruim', nCV)}
+          ${nE?tolItem('Plantas/m × sementes/m', fmt(plM,1)+' / '+fmt(sem,1)+' ('+fmt(efic,0)+'%)', '≥ 90% aceitável · 80–90% atenção · &lt; 80% ruim', nE):''}
+        </div>
         <div class="stack-bar"><div style="width:${pA}%;background:var(--green);"></div><div style="width:${pD}%;background:#E0A800;"></div><div style="width:${pF}%;background:var(--danger);"></div></div>
         <div class="hstack" style="gap:12px;flex-wrap:wrap;font-size:12px;margin-top:4px;">
           <span><span class="dot" style="background:var(--green);"></span> Aceitáveis ${fmt(pA,0)}%</span>
           <span><span class="dot" style="background:#E0A800;"></span> Duplas ${fmt(pD,0)}%</span>
           <span><span class="dot" style="background:var(--danger);"></span> Falhas ${fmt(pF,0)}%</span></div>
-        <div class="field-hint" style="margin-top:6px;">Critério de Kurachi et al. (1989): ≥90% aceitáveis ótimo · 75–90% bom · 50–75% regular · &lt;50% insatisfatório.${cult==='milho'?' No milho, falhas e duplas pesam mais — busque ≥ 90%.':''}${d.length<20?' <b>Faça pelo menos 20 medidas.</b>':''}</div>`;
+        ${resultadoHTML([[fmt(plM,1)+' pl/m','Plantas por metro'],[esp>0?fmtInt(plM*10000/(esp/100))+'/ha':'—','População estimada']])}
+        <div class="field-hint" style="margin-top:6px;">Aceitáveis, falhas e duplas pelo critério de Kurachi et al. (1989): aceitável entre 0,5 e 1,5 × a distância ideal. As faixas de falhas, duplas, CV e plantas/m são referências práticas de campo para regulagem.${cult==='milho'?' No milho, falhas e duplas pesam mais — busque ≥ 90% de aceitáveis.':''}${d.length<20?' <b>Faça pelo menos 20 medidas para um resultado confiável.</b>':''}</div>`;
     };
     ligarChips('data-cvcult', v=>{ cult=v; document.getElementById('cv_sem').value = SEMENTES_PADRAO[v]; document.getElementById('cv_esp').value = v==='milho'?50:45; calc(); });
-    ['cv_sem','cv_esp','cv_dist'].forEach(id=>document.getElementById(id).addEventListener('input', calc));
+    ['cv_sem','cv_esp'].forEach(id=>document.getElementById(id).addEventListener('input', calc));
+    document.getElementById('cv_add').addEventListener('click', adicionar);
+    document.getElementById('cv_val').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); adicionar(); } });
+    document.getElementById('cv_limpar').addEventListener('click', ()=>{ if(vals.length && confirm('Apagar todas as medidas?')){ vals.length = 0; lista(); calc(); } });
+    lista(); calc();
+  },
+  fontes(){
+    const LS = 'urtigao_precos_adubo';
+    let salvo = {}; try{ salvo = JSON.parse(localStorage.getItem(LS)||'{}'); }catch(e){}
+    let cult = 'soja', base = 'export';
+    // garantias padrão (N-P2O5-K2O) — editáveis; S e Ca só informativos
+    const FONTES = [
+      { k:'map', nome:'MAP', form:'11-52-00', extra:'' },
+      { k:'dap', nome:'DAP', form:'18-46-00', extra:'' },
+      { k:'ss',  nome:'Superfosfato simples', form:'00-18-00', extra:'+ ~10% S e ~18% Ca' },
+      { k:'st',  nome:'Superfosfato triplo', form:'00-41-00', extra:'+ ~10% Ca' },
+      { k:'f1',  nome:'Formulado 1', form:'04-30-10', extra:'' },
+      { k:'f2',  nome:'Formulado 2', form:'02-20-20', extra:'' },
+      { k:'f3',  nome:'Formulado 3', form:'', extra:'' }
+    ];
+    const box = document.getElementById('fo_fontes');
+    box.innerHTML = FONTES.map(f=>`
+      <div class="fonte-row">
+        <input class="fo-nome" data-fonome="${f.k}" value="${esc(salvo[f.k+'_nome']||f.nome)}" ${f.k.startsWith('f')?'':'readonly'}>
+        <input class="fo-form" data-foform="${f.k}" value="${esc(salvo[f.k+'_form']??f.form)}" placeholder="N-P-K" inputmode="decimal">
+        <input class="fo-preco" data-fopreco="${f.k}" value="${esc(salvo[f.k]||'')}" placeholder="R$/t" type="number" inputmode="decimal">
+      </div>${f.extra?`<div class="field-hint" style="margin:-2px 0 4px;">${f.extra}</div>`:''}`).join('');
+    const salvar = ()=>{ const o = {};
+      FONTES.forEach(f=>{ o[f.k] = document.querySelector(`[data-fopreco="${f.k}"]`).value; o[f.k+'_form'] = document.querySelector(`[data-foform="${f.k}"]`).value; o[f.k+'_nome'] = document.querySelector(`[data-fonome="${f.k}"]`).value; });
+      o.kcl = document.getElementById('fo_kcl').value; o.saca = document.getElementById('fo_saca').value;
+      try{ localStorage.setItem(LS, JSON.stringify(o)); }catch(e){} };
+    document.getElementById('fo_kcl').value = salvo.kcl || '';
+    document.getElementById('fo_saca').value = salvo.saca || '';
+    const calc = ()=>{
+      salvar();
+      const prod = ferrNum('fo_prod'), tHa = prod>0 ? prod*60/1000 : NaN;
+      const c = COEF_NUTRIENTES[cult];
+      const nP = base==='export' ? c.exportacao.P2O5*tHa : ferrNum('fo_p');
+      const nK = base==='export' ? c.exportacao.K2O*tHa : ferrNum('fo_k');
+      document.getElementById('fo_manBox').style.display = base==='manual' ? '' : 'none';
+      const pKcl = ferrNum('fo_kcl'), saca = ferrNum('fo_saca');
+      const res = document.getElementById('fo_res');
+      if(!(nP>0)){ res.innerHTML = `<div class="field-hint">Informe a produtividade esperada (ou a dose de P₂O₅).</div>`; return; }
+      const progs = [];
+      FONTES.forEach(f=>{
+        const g = parseFormulacao(document.querySelector(`[data-foform="${f.k}"]`).value);
+        const preco = num(document.querySelector(`[data-fopreco="${f.k}"]`).value);
+        const nome = document.querySelector(`[data-fonome="${f.k}"]`).value || f.nome;
+        if(!g.ok || !(g.P2O5>0)) return;
+        const dose = nP/(g.P2O5/100);
+        const kEntregue = dose*g.K2O/100, kFalta = Math.max(0, (nK||0) - kEntregue);
+        const doseKcl = kFalta>0 ? kFalta/0.60 : 0;
+        const custo = (preco>0 ? dose*preco/1000 : NaN) + (doseKcl>0 ? (pKcl>0 ? doseKcl*pKcl/1000 : NaN) : 0);
+        progs.push({ nome, form: document.querySelector(`[data-foform="${f.k}"]`).value, dose, doseKcl, n: dose*g.N/100, p: nP, k: kEntregue + doseKcl*0.6,
+          custo, rsP: preco>0 ? preco/1000/(g.P2O5/100) : NaN, extra:f.extra, semPreco: !(preco>0) || (doseKcl>0 && !(pKcl>0)) });
+      });
+      const comPreco = progs.filter(p=>!isNaN(p.custo)).sort((a,b)=>a.custo-b.custo);
+      const semPreco = progs.filter(p=>isNaN(p.custo));
+      const melhor = comPreco[0];
+      res.innerHTML = `
+        <div class="passos">Necessidade para ${fmt(prod,0)} sc/ha (${fmt(tHa,1)} t/ha): <b>${fmtInt(nP)} kg/ha de P₂O₅</b> e <b>${fmtInt(nK||0)} kg/ha de K₂O</b> ${base==='export'?'(reposição do que sai nos grãos)':'(dose informada)'}</div>
+        ${melhor ? `<div class="destaque"><span>Mais barato para esta produção</span><b>${esc(melhor.nome)}${melhor.doseKcl>0?' + KCl':''}</b><span>R$ ${fmt(melhor.custo,2)}/ha${saca>0?` · ${fmt(melhor.custo/saca,2)} sc/ha`:''}${prod>0?` · R$ ${fmt(melhor.custo/prod,2)} por saca produzida`:''}</span></div>` : `<div class="field-hint" style="margin:8px 0;">Preencha os preços (R$/t) para comparar o custo.</div>`}
+        <div class="tol-list">${comPreco.concat(semPreco).map((p,i)=>`<div class="tol-item ${p===melhor?'tol-ok':''}">
+          <div class="tol-top"><span>${p===melhor?'🏆 ':(isNaN(p.custo)?'':(i+1)+'º ')}<b style="display:inline;font-size:14px;">${esc(p.nome)}</b> <span style="color:var(--ink-soft);">${esc(p.form)}</span>${p.doseKcl>0?' + KCl':''}</span>
+            <span style="font-weight:800;white-space:nowrap;">${isNaN(p.custo)?'<span class="field-hint">sem preço</span>':'R$ '+fmt(p.custo,2)+'/ha'}</span></div>
+          <small>Dose: <b style="display:inline;font-size:12px;">${fmtInt(p.dose)} kg/ha</b>${p.doseKcl>0?` + <b style="display:inline;font-size:12px;">${fmtInt(p.doseKcl)} kg/ha KCl</b>`:''} · entrega N ${fmtInt(p.n)} · P₂O₅ ${fmtInt(p.p)} · K₂O ${fmtInt(p.k)}</small>
+          <small>${isNaN(p.rsP)?'':'R$ '+fmt(p.rsP,2)+' por kg de P₂O₅'}${!isNaN(p.custo)&&saca>0?' · '+fmt(p.custo/saca,2)+' sc/ha':''}${!isNaN(p.custo)&&melhor&&p!==melhor?` · <b style="display:inline;font-size:12px;color:var(--danger);">+ R$ ${fmt(p.custo-melhor.custo,2)}/ha</b> que o melhor`:''}</small>
+        </div>`).join('')}</div>
+        <div class="field-hint" style="margin-top:6px;">A dose de cada fonte é calculada para entregar o P₂O₅ necessário; o K₂O que faltar é completado com KCl (60% K₂O). Formulados saem numa única aplicação; fontes simples + KCl precisam de mistura ou duas operações. O superfosfato simples também fornece enxofre e cálcio, e MAP/DAP fornecem nitrogênio — considere isso na escolha. Preços ficam salvos neste celular.</div>`;
+    };
+    ligarChips('data-focult', v=>{ cult=v; document.getElementById('fo_prod').value = PRODUT_PADRAO[v]; calc(); });
+    ligarChips('data-fobase', v=>{ base=v; calc(); });
+    document.querySelectorAll('#ferrCorpo input').forEach(el=>el.addEventListener('input', calc));
     calc();
   },
   pulverizador(){
