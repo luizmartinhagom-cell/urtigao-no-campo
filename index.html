@@ -1016,7 +1016,13 @@ function subscribeCatalogo(){
         if(!itens.some(i=>normNome(i.nome)===normNome(n))) itens.push({ nome:n, numero:null });
       });
       aplicarCatalogoLocal(itens, d.dono||null);
+      // lista oficial da safra: substitui o que estiver salvo UMA vez por versão
+      // (depois disso as alterações feitas no app — renomear, tirar, incluir — ficam valendo)
+      if(listaOficialItens(safra).length && d.oficialVersao!==OFICIAL_VERSAO[safra] && safra===STATE.safraAtual && (podeEditarProtocolo() || !d.dono)){
+        await aplicarListaOficial();
+      }
       renderAll();
+      if(STATE.modalListaProtAberto && document.getElementById('listaProtWrap')) abrirModalListaProtocolo();
       const modalLista = document.getElementById('listaCampoMat');
       if(modalLista && STATE.modalSelecaoCampoId){
         const c = STATE.campos.find(x=>x.id===STATE.modalSelecaoCampoId);
@@ -1042,14 +1048,128 @@ function numeroCatalogo(nome){
   return it ? it.numero : null;
 }
 function podeEditarProtocolo(){
-  return !STATE.catalogoDono || mesmoConsultor(STATE.catalogoDono, STATE.consultor);
+  return !STATE.catalogoDono || mesmoConsultor(STATE.catalogoDono, STATE.consultor) || ehResponsavel();
 }
-async function salvarCatalogo(itens){
+/* Lista OFICIAL do protocolo por safra (ordem = nº do material). Entra sozinha
+   quando a lista da safra está vazia; o responsável também pode reaplicar. */
+const LISTA_OFICIAL = {
+  "2026/27": ["ST 627 I2X","BMX VULCANO I2X","C 2636 CE","M 6330 I2X","BMX FERA I2X","C 2645 CE","CZ 26B41 I2X","DM 64K67 CE","FPS 2664 I2X","HO CORRENTES I2X","HO DOURADOS I2X","DM 65IX67 I2X","GF 65IX27 I2X","CZ 26B62 I2X","GH 6630 I2X","M 6626 I2X","NEO 661 I2X","ST 670 I2X","BMX BATALHA CE"]
+};
+function listaOficialItens(safra){
+  return (LISTA_OFICIAL[safra||STATE.safraAtual]||[]).map((nome,i)=>({ nome, numero:i+1 }));
+}
+function catalogoIgualOficial(){
+  const of = listaOficialItens(); if(!of.length) return true;
+  const at = (STATE.catalogoItens||[]).slice().sort(compararPorNumero);
+  return at.length===of.length && at.every((it,i)=>normNome(it.nome)===normNome(of[i].nome) && it.numero===of[i].numero);
+}
+// muda quando a lista oficial for trocada → ao abrir, o app substitui a lista salva uma vez
+const OFICIAL_VERSAO = { "2026/27": "2026-10-02b" };
+async function aplicarListaOficial(){
+  const of = listaOficialItens();
+  if(!of.length) return false;
+  return await salvarCatalogo(of, { oficialVersao: OFICIAL_VERSAO[STATE.safraAtual]||null });
+}
+// renomeia na lista do protocolo e nos campos desta safra que você pode editar
+async function renomearNoCatalogo(antigo, novo){
+  novo = String(novo||'').trim();
+  if(!novo || normNome(novo)===normNome(antigo)) return false;
+  if((STATE.catalogoItens||[]).some(i=>normNome(i.nome)===normNome(novo))){ toast("Já existe um material com esse nome na lista"); return false; }
+  const ok = await salvarCatalogo((STATE.catalogoItens||[]).map(i=> normNome(i.nome)===normNome(antigo) ? { nome:novo, numero:i.numero } : i));
+  if(!ok) return false;
+  for(const c of STATE.campos.filter(c=>!ehDifusao(c) && daSafra(c) && podeEditar(c))){
+    if(!(c.materiais||[]).some(m=>normNome(m.nome)===normNome(antigo))) continue;
+    await salvarCampo(c.id, { materiais: c.materiais.map(m=> normNome(m.nome)===normNome(antigo) ? Object.assign({}, m, { nome:novo }) : m) });
+  }
+  return true;
+}
+// sobe/desce um material na ordem e renumera 1, 2, 3...
+async function moverNoCatalogo(nome, dir){
+  const itens = (STATE.catalogoItens||[]).slice().sort(compararPorNumero);
+  const i = itens.findIndex(it=>normNome(it.nome)===normNome(nome)), j = i+dir;
+  if(i<0 || j<0 || j>=itens.length) return false;
+  [itens[i], itens[j]] = [itens[j], itens[i]];
+  return await salvarCatalogo(itens.map((it,k)=>({ nome:it.nome, numero:k+1 })));
+}
+// lista do protocolo com ▲ ▼ ✕ (usada na tela do campo e na aba Protocolos)
+function htmlListaProtocolo(){
+  const protoEditavel = podeEditarProtocolo();
+  const catalogo = (STATE.catalogoItens||[]).slice().sort(compararPorNumero);
+  const temOficial = listaOficialItens().length>0;
+  return `
+    <div class="field-hint" style="margin:6px 0;">${protoEditavel ? 'Use ▲ ▼ para mudar a ordem (o nº acompanha), ✕ para tirar da lista. Os campos já lançados continuam com seus materiais.' : 'Só o responsável pelo protocolo altera esta lista.'}</div>
+    ${protoEditavel && temOficial && !catalogoIgualOficial() ? `<button type="button" class="btn btn-sm btn-block" id="btnListaOficial" style="margin-bottom:6px;">↺ Restaurar a lista oficial ${esc(STATE.safraAtual)} (${listaOficialItens().length} materiais)</button>` : ''}
+    ${protoEditavel ? `<button type="button" class="btn btn-sm btn-yellow btn-block" id="btnImportarLista" style="margin-bottom:6px;">📋 Colar lista ou importar planilha</button>` : ''}
+    ${catalogo.map((it,k)=>`
+      <div class="hstack" style="gap:6px;padding:6px 0;border-bottom:1px solid var(--line);">
+        ${protoEditavel ? `<input class="cat-num" type="number" inputmode="numeric" min="0" step="1" data-catnum="${esc(it.nome)}" value="${it.numero??''}" placeholder="nº">` : `<span class="cat-num-ro">${it.numero??'–'}</span>`}
+        <span style="flex:1;min-width:0;font-size:13.5px;overflow-wrap:anywhere;">${esc(it.nome)}</span>
+        ${protoEditavel ? `
+          <button type="button" class="btn btn-sm btn-ghost" data-catren="${esc(it.nome)}" title="Renomear" style="padding:4px 6px;">✏️</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-catmv="-1" data-catnome="${esc(it.nome)}" ${k===0?'disabled':''} style="padding:4px 7px;">▲</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-catmv="1" data-catnome="${esc(it.nome)}" ${k===catalogo.length-1?'disabled':''} style="padding:4px 7px;">▼</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-catrm="${esc(it.nome)}" style="color:var(--danger);padding:4px 7px;">✕</button>` : ''}
+      </div>`).join('') || '<div class="field-hint">Lista vazia.</div>'}
+    ${protoEditavel ? `
+      <div class="hstack" style="margin-top:8px;">
+        <input id="lpNum" type="number" inputmode="numeric" step="1" placeholder="nº" value="${proximoNumeroCatalogo()}" style="width:64px;flex:none;padding:9px 8px;border:1.5px solid var(--line);border-radius:10px;">
+        <input id="lpNome" placeholder="Novo material na lista" class="grow" style="min-width:0;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;">
+        <button class="btn btn-sm" type="button" id="lpAdd" style="flex:none;">＋</button>
+      </div>` : ''}`;
+}
+function wireListaProtocolo(reabrir, campo){
+  const of = document.getElementById('btnListaOficial');
+  if(of) of.addEventListener('click', async ()=>{
+    if(!confirm(`Substituir a lista do protocolo ${STATE.safraAtual} pela lista oficial (${listaOficialItens().length} materiais, na ordem oficial)? Materiais que não estão na lista oficial saem da lista padrão (os campos já lançados não mudam).`)) return;
+    if(await aplicarListaOficial()){ toast("Lista oficial aplicada ✓"); reabrir(); }
+  });
+  document.querySelectorAll('[data-catren]').forEach(b=>b.addEventListener('click', async ()=>{
+    const novo = prompt(`Novo nome para "${b.dataset.catren}":`, b.dataset.catren);
+    if(novo==null) return;
+    if(await renomearNoCatalogo(b.dataset.catren, novo)){ toast("Renomeado ✓"); reabrir(); }
+  }));
+  document.querySelectorAll('[data-catmv]').forEach(b=>b.addEventListener('click', async ()=>{
+    if(await moverNoCatalogo(b.dataset.catnome, +b.dataset.catmv)) reabrir();
+  }));
+  document.querySelectorAll('[data-catnum]').forEach(inp=>inp.addEventListener('change', async ()=>{
+    const v = num(inp.value);
+    if(await definirNumeroCatalogo(inp.dataset.catnum, isNaN(v) ? null : Math.round(v))) reabrir();
+  }));
+  document.querySelectorAll('[data-catrm]').forEach(btn=>btn.addEventListener('click', async ()=>{
+    if(!confirm(`Tirar "${btn.dataset.catrm}" da lista do protocolo? (Os campos que já têm esse material continuam com ele.)`)) return;
+    if(await removerDoCatalogo(btn.dataset.catrm)){ toast("Tirado da lista"); reabrir(); }
+  }));
+  const add = async ()=>{
+    const nome = document.getElementById('lpNome').value.trim();
+    const n = num(document.getElementById('lpNum').value);
+    if(!nome){ toast("Digite o nome do material"); return; }
+    if((STATE.catalogoItens||[]).some(i=>normNome(i.nome)===normNome(nome))){ toast("Esse material já está na lista"); return; }
+    if(await adicionarAoCatalogo(nome, isNaN(n)?null:Math.round(n))){ toast("Adicionado à lista ✓"); reabrir(); }
+  };
+  const bAdd = document.getElementById('lpAdd');
+  if(bAdd){ bAdd.addEventListener('click', add); document.getElementById('lpNome').addEventListener('keydown', e=>{ if(e.key==='Enter') add(); }); }
+  const bImp = document.getElementById('btnImportarLista');
+  if(bImp) bImp.addEventListener('click', ()=>abrirModalImportarLista(campo || null));
+}
+function abrirModalListaProtocolo(){
+  const scroll = document.querySelector('.modal')?.scrollTop || 0;
+  openModal(`
+    <h3>📋 Lista do protocolo ${esc(STATE.safraAtual)}</h3>
+    <p class="field-hint" style="margin-bottom:4px;">${(STATE.catalogoItens||[]).length} materiais${STATE.catalogoDono?` · responsável ${esc(STATE.catalogoDono)}`:''}. É a lista padrão que todos os consultores puxam ao montar um campo.</p>
+    <div id="listaProtWrap">${htmlListaProtocolo()}</div>
+    <button class="btn btn-primary btn-block" style="margin-top:12px;" id="lpFechar">Concluído</button>
+  `, { wide:true });
+  const md = document.querySelector('.modal'); if(md) md.scrollTop = scroll;
+  STATE.modalListaProtAberto = true;
+  wireListaProtocolo(abrirModalListaProtocolo, null);
+  document.getElementById('lpFechar').addEventListener('click', ()=>{ STATE.modalListaProtAberto = false; closeModal(); renderAll(); });
+}
+async function salvarCatalogo(itens, extra){
   if(!podeEditarProtocolo()){
     toast(`Protocolo lançado por ${STATE.catalogoDono} — só ele(a) pode alterar.`);
     return false;
   }
-  const dono = STATE.catalogoDono || STATE.consultor;
+  const dono = STATE.catalogoDono || (extra?.oficialVersao ? RESPONSAVEL : STATE.consultor);
   const limpos = itens.map(i=>({ nome:String(i.nome).trim(), numero: (i.numero==null||isNaN(i.numero)) ? null : Number(i.numero) }));
   if(!STATE.db){
     aplicarCatalogoLocal(limpos, dono);
@@ -1057,7 +1177,7 @@ async function salvarCatalogo(itens){
     return true;
   }
   gravarSemEsperar(STATE.db.collection(CATALOGO_COLLECTION).doc(docCatalogo())
-    .set({ itens: limpos, nomes: limpos.map(i=>i.nome), dono, safra: STATE.safraAtual }, { merge:true }));
+    .set(Object.assign({ itens: limpos, nomes: limpos.map(i=>i.nome), dono, safra: STATE.safraAtual }, extra||{}), { merge:true }));
   aplicarCatalogoLocal(limpos, dono);
   return true;
 }
@@ -1644,6 +1764,8 @@ function camposDifusao(){ return STATE.campos.filter(ehDifusao); }
 // Número do material: no protocolo vem do catálogo (numeração única para
 // todos os campos); em campo de difusão é digitado no próprio material.
 function numeroMaterial(campo, mat){
+  // ordem de plantio própria do campo (▲ ▼ em "Materiais do campo")
+  if(!ehDifusao(campo) && mat.ordem!=null && mat.status!=='excluido') return Number(mat.ordem);
   if(!ehDifusao(campo)){
     const n = numeroCatalogo(mat.nome);
     if(n!=null) return n;
@@ -1667,6 +1789,94 @@ function rotuloMaterial(campo, mat){
 }
 function materiaisExcluidos(campo){
   return (campo.materiais||[]).filter(m=>m.status==='excluido');
+}
+/* Ordem de plantio do campo: numera 1, 2, 3... os materiais ativos — os que já
+   têm ordem ficam na sequência deles e os novos entram junto dos vizinhos da
+   lista do protocolo. Tirar um material fecha o buraco. */
+function comOrdem(campo, materiais){
+  if(ehDifusao(campo)) return materiais;
+  const nCat = m => { const n = numeroCatalogo(m.nome); return n!=null ? n : (m.numero==null||m.numero==='' ? null : Number(m.numero)); };
+  const ativos = materiais.filter(m=>m.status!=='excluido');
+  const comO = ativos.filter(m=>m.ordem!=null).sort((a,b)=>a.ordem-b.ordem);
+  const semO = ativos.filter(m=>m.ordem==null).map(m=>({ m, numero:nCat(m), nome:m.nome })).sort(compararPorNumero).map(x=>x.m);
+  // novos entram perto dos vizinhos da lista do protocolo (depois do último com nº menor)
+  const seq = comO.slice();
+  semO.forEach(m=>{
+    const n = nCat(m);
+    if(n==null){ seq.push(m); return; }
+    let ultMenor = -1, primMaior = -1;
+    seq.forEach((x,i)=>{ const nx = nCat(x); if(nx==null) return; if(nx<=n) ultMenor = i; else if(primMaior<0) primMaior = i; });
+    const at = ultMenor>=0 ? ultMenor+1 : (primMaior>=0 ? primMaior : seq.length);
+    seq.splice(at, 0, m);
+  });
+  const pos = new Map(seq.map((m,i)=>[m, i+1]));
+  return materiais.map(m=> m.status==='excluido' ? (m.ordem!=null ? Object.assign({}, m, { ordem:null }) : m) : (m.ordem===pos.get(m) ? m : Object.assign({}, m, { ordem:pos.get(m) })));
+}
+async function moverNoCampo(campo, matId, dir){
+  if(!podeEditar(campo)) return false;
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  const seq = materiaisAtivos(campo);
+  const i = seq.findIndex(m=>m.id===matId), j = i+dir;
+  if(i<0 || j<0 || j>=seq.length) return false;
+  [seq[i], seq[j]] = [seq[j], seq[i]];
+  const pos = new Map(seq.map((m,k)=>[m.id, k+1]));
+  const materiais = (campo.materiais||[]).map(m=> pos.has(m.id) ? Object.assign({}, m, { ordem:pos.get(m.id) }) : m);
+  await salvarCampo(campo.id, { materiais });
+  return true;
+}
+// coloca um material numa posição de plantio: quem estava ali e os seguintes descem uma posição
+function posicionarMaterial(campo, materiais, alvoId, pos){
+  const base = comOrdem(campo, materiais.map(m=> m.id===alvoId ? Object.assign({}, m, { status:'ok', ordem:null }) : m));
+  const seq = base.filter(m=>m.status!=='excluido').sort((a,b)=>a.ordem-b.ordem);
+  const i = seq.findIndex(m=>m.id===alvoId);
+  if(i<0) return base;
+  const [alvo] = seq.splice(i, 1);
+  const p = Math.max(1, Math.min(seq.length+1, Math.round(pos) || seq.length+1));
+  seq.splice(p-1, 0, alvo);
+  const map = new Map(seq.map((m,k)=>[m.id, k+1]));
+  return base.map(m=> map.has(m.id) ? Object.assign({}, m, { ordem:map.get(m.id) }) : m);
+}
+async function moverParaPosicao(campo, matId, pos){
+  if(!podeEditar(campo)) return false;
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  await salvarCampo(campo.id, { materiais: posicionarMaterial(campo, campo.materiais||[], matId, pos) });
+  return true;
+}
+// inclui um material no campo (da lista ou "outro") já na posição de plantio escolhida
+async function inserirMaterialNaPosicao(campo, nome, pos){
+  if(!podeEditar(campo)){ toast("Sem permissão"); return false; }
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  let materiais = (campo.materiais||[]).slice();
+  let alvo = materiais.find(m=>normNome(m.nome)===normNome(nome));
+  if(alvo && alvo.status!=='excluido'){ toast("Esse material já está neste campo"); return false; }
+  if(!alvo){ alvo = novoMaterialObj(campo, nome); materiais.push(alvo); }
+  await salvarCampo(campo.id, { materiais: posicionarMaterial(campo, materiais, alvo.id, pos) });
+  return true;
+}
+async function renomearMaterialCampo(campo, matId, novo){
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  novo = String(novo||'').trim();
+  if(!novo) return false;
+  if((campo.materiais||[]).some(m=>m.id!==matId && m.status!=='excluido' && normNome(m.nome)===normNome(novo))){ toast("Já existe um material com esse nome neste campo"); return false; }
+  await salvarMaterial(campo, matId, { nome:novo });
+  return true;
+}
+async function preencherTodosCampo(campo, vals){
+  campo = STATE.campos.find(c=>c.id===campo.id) || campo;
+  const patch = {};
+  const materiais = (campo.materiais||[]).map(m=>{
+    if(m.status==='excluido') return m;
+    const o = Object.assign({}, m);
+    if(vals.linhas>0) o.numeroLinhas = Math.round(vals.linhas);
+    if(vals.comp>0) o.comprimentoM = null;          // passa a valer o padrão do campo
+    if(vals.sem>0) o.sementesPorMetro = vals.sem;
+    return o;
+  });
+  if(vals.comp>0) patch.comprimentoPadraoM = vals.comp;
+  if(vals.sem>0) patch.sementesPorMetroPadrao = vals.sem;
+  if(vals.esp>0) patch.espacamentoCm = vals.esp;
+  patch.materiais = materiais;
+  await salvarCampo(campo.id, patch);
 }
 function areaTotalCampo(campo){
   let total = 0;
@@ -1973,8 +2183,9 @@ function renderProtocolos(){
       <div class="campo-sub">Campos do protocolo de avaliação de materiais. Toque em "+" para cadastrar um novo.</div>
     </div></div>
     <div class="hstack" style="gap:8px;margin-bottom:10px;">
-      <button class="btn btn-sm grow" id="protXlsx">📊 Excel</button>
-      <button class="btn btn-sm grow" id="protPdf">📄 PDF</button>
+      <button class="btn btn-sm btn-yellow grow" id="protLista">📋 Lista do protocolo (${(STATE.catalogoItens||[]).length})</button>
+      <button class="btn btn-sm" id="protXlsx">📊 Excel</button>
+      <button class="btn btn-sm" id="protPdf">📄 PDF</button>
     </div>
     <div class="searchbar"><span>🔎</span><input type="text" id="protBusca" placeholder="Buscar fazenda, produtor, consultor ou material..." value="${esc(STATE.protBusca||'')}"></div>
     <div class="chip-select" style="margin-bottom:10px;">
@@ -1988,6 +2199,7 @@ function renderProtocolos(){
   const b = document.getElementById('protBusca');
   b.addEventListener('input', ()=>{ STATE.protBusca=b.value; renderProtocolos(); const n=document.getElementById('protBusca'); n.focus(); n.setSelectionRange(n.value.length,n.value.length); });
   el.querySelectorAll('[data-protmeus]').forEach(x=>x.addEventListener('click', ()=>{ STATE.protSoMeus = x.dataset.protmeus==='1'; renderProtocolos(); }));
+  document.getElementById('protLista').addEventListener('click', abrirModalListaProtocolo);
   document.getElementById('protXlsx').addEventListener('click', ()=>exportarExcel(lista));
   document.getElementById('protPdf').addEventListener('click', ()=>exportarPDF(lista));
 }
@@ -2495,7 +2707,8 @@ function renderResultados(){
     <div class="hstack" style="gap:8px;margin-top:4px;">
       <button class="btn btn-sm btn-primary grow" id="resCompleto">🧪 Relatório estatístico</button>
       <button class="btn btn-sm" id="resXlsx">📊 Excel</button>
-    </div>`;
+    </div>
+    <button class="btn btn-yellow btn-block" id="resRede" style="margin-top:8px;">📄 Relatório da rede (PDF) — todos os locais</button>`;
   document.querySelectorAll('[data-restipo]').forEach(b=>b.addEventListener('click', ()=>{ STATE.resTipo=b.dataset.restipo; renderResultados(); }));
   document.querySelectorAll('[data-resvista]').forEach(b=>b.addEventListener('click', ()=>{ STATE.resVista=b.dataset.resvista; renderResultados(); document.getElementById('resPainel')?.scrollIntoView({ block:'start' }); }));
   const bp = document.getElementById('resPainel'); if(bp) bp.addEventListener('click', ()=>{ STATE.resVista=null; renderResultados(); });
@@ -2506,6 +2719,7 @@ function renderResultados(){
   const duB = document.getElementById('duB'); if(duB) duB.addEventListener('change', ()=>{ STATE.dueloB = duB.value; renderResultados(); });
   document.getElementById('resCompleto').addEventListener('click', ()=>abrirEstatisticas(campos, varKey));
   document.getElementById('resXlsx').addEventListener('click', ()=>exportarExcel(campos));
+  document.getElementById('resRede').addEventListener('click', ()=>gerarRelatorioRedePDF(campos, tipoDif));
 }
 
 
@@ -3750,6 +3964,13 @@ function renderModalTabelaDesconto(){
 
 function abrirModalSelecionarMateriais(campo){
   STATE.modalSelecaoCampoId = campo.id;
+  // campo antigo (sem posição de plantio gravada): numera 1..n uma vez, na ordem atual
+  if(podeEditar(campo) && !ehDifusao(campo) && materiaisAtivos(campo).some(m=>m.ordem==null)){
+    const seq = materiaisAtivos(campo), map = new Map(seq.map((m,k)=>[m.id,k+1]));
+    const materiais = (campo.materiais||[]).map(m=> map.has(m.id) ? Object.assign({}, m, { ordem:map.get(m.id) }) : m);
+    salvarCampo(campo.id, { materiais });
+    campo = Object.assign({}, campo, { materiais });
+  }
   const scrollAnterior = document.querySelector('.modal')?.scrollTop || 0;
   const campoEditavel = podeEditar(campo);
   const protoEditavel = podeEditarProtocolo();
@@ -3762,48 +3983,65 @@ function abrirModalSelecionarMateriais(campo){
   openModal(`
     <h3>Materiais deste campo</h3>
     <p class="field-hint" style="margin-bottom:8px;">${esc(campo.fazenda||'')} · ${ativos.length} material(is) · ${fmtInt(totalLinhas)} linhas plantadas</p>
+
     ${campoEditavel && ativos.length===0 && catalogo.length ? `
       <button type="button" class="btn btn-primary btn-block" id="btnTodosOk">📋 Incluir todos os materiais do protocolo (${catalogo.length})</button>
-      <div class="field-hint" style="margin:4px 0 10px;">Puxa a lista padrão do protocolo. Depois é só informar as linhas e tirar o que não foi plantado.</div>` : ''}
+      <div class="field-hint" style="margin:4px 0 10px;">Puxa a lista padrão do protocolo, na ordem oficial. Depois é só ajustar a ordem de plantio (▲ ▼), preencher as linhas para todos e tirar o que não foi plantado.</div>` : ''}
     ${campoEditavel && ativos.length>0 && faltando.length ? `
       <button type="button" class="btn btn-sm btn-block" id="btnTodosOk" style="margin-bottom:8px;">＋ Incluir os ${faltando.length} que faltam do protocolo</button>` : ''}
+    ${campoEditavel && ativos.length ? `
+    <details class="card" style="padding:10px 12px;margin:0 0 10px;background:var(--green-light);" ${ativos.some(m=>!m.numeroLinhas)?"open":""}>
+      <summary class="section-title" style="margin:0 0 4px;cursor:pointer;">⚡ Preencher para todos de uma vez</summary>
+      <div class="field-hint" style="margin:0 0 6px;">Deixe em branco o que não quiser mudar. Vale para os ${ativos.length} materiais; depois dá para ajustar um a um.</div>
+      <div class="grid2">
+        <div class="field" style="margin:0;"><label>Linhas por material</label><input id="pt_linhas" type="number" inputmode="numeric" step="1" placeholder="Ex: 9"></div>
+        <div class="field" style="margin:0;"><label>Comprimento (m)</label><input id="pt_comp" type="number" inputmode="decimal" step="any" placeholder="${num(campo.comprimentoPadraoM)>0?fmt(campo.comprimentoPadraoM,0):'Ex: 200'}"></div>
+        <div class="field" style="margin:0;"><label>Espaçamento (cm)</label><input id="pt_esp" type="number" inputmode="decimal" step="any" placeholder="${num(campo.espacamentoCm)>0?fmt(campo.espacamentoCm,0):'Ex: 45'}"></div>
+        <div class="field" style="margin:0;"><label>Sementes por metro</label><input id="pt_sem" type="number" inputmode="decimal" step="any" placeholder="${num(campo.sementesPorMetroPadrao)>0?fmt(campo.sementesPorMetroPadrao,1):'Ex: 14'}"></div>
+      </div>
+      <button type="button" class="btn btn-primary btn-block" id="btnPreencherTodos" style="margin-top:8px;">Aplicar a todos (${ativos.length})</button>
+    </details>` : ''}
     <div id="listaCampoMat">
-      ${ativos.length ? ativos.map(m=>{ const n = numeroMaterial(campo,m); return `
-        <div class="cat-row hstack" style="gap:8px;">
-          <span class="cat-num-ro">${n??'–'}</span>
-          <span style="font-size:14px;font-weight:600;flex:1;min-width:0;overflow-wrap:anywhere;">${esc(m.nome)}</span>
-          ${campoEditavel ? `<label class="hstack" style="gap:4px;font-size:11.5px;color:var(--ink-soft);flex:none;">Linhas
-            <input class="cat-linhas" type="number" inputmode="numeric" min="0" step="1" data-catlinhas="${esc(m.id)}" value="${m.numeroLinhas??''}" placeholder="—"></label>
-            <button type="button" class="btn btn-sm btn-ghost" data-tirar="${esc(m.nome)}" title="Tirar deste campo" style="color:var(--danger);padding:4px 6px;">✕</button>`
-          : `<span class="field-hint" style="margin:0;">${m.numeroLinhas?fmtInt(m.numeroLinhas)+' linhas':''}</span>`}
+      ${ativos.length && campoEditavel ? `<div class="field-hint" style="margin:0 0 4px;">Posição no plantio: digite o número (ex.: 8) ou use ▲ ▼ — quem estava na posição e os seguintes descem uma casa. ✏️ renomeia, ✕ tira do campo.</div>` : ''}
+      ${ativos.length ? ativos.map((m,k)=>{ const n = numeroMaterial(campo,m); return `
+        <div class="cat-row" style="padding:7px 0;border-bottom:1px solid var(--line);">
+          <div class="hstack" style="gap:8px;">
+            ${campoEditavel ? `<input class="cat-num" type="number" inputmode="numeric" min="1" step="1" data-campopos="${esc(m.id)}" value="${n??''}" title="Posição no plantio" style="width:54px;flex:none;">` : `<span class="cat-num-ro">${n??'–'}</span>`}
+            <span style="font-size:14px;font-weight:600;flex:1;min-width:0;overflow-wrap:anywhere;">${esc(m.nome)}</span>
+            ${campoEditavel ? `
+              <button type="button" class="btn btn-sm btn-ghost" data-camporen="${esc(m.id)}" title="Renomear" style="padding:4px 6px;">✏️</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-campomv="-1" data-matid="${esc(m.id)}" ${k===0?'disabled':''} style="padding:4px 8px;">▲</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-campomv="1" data-matid="${esc(m.id)}" ${k===ativos.length-1?'disabled':''} style="padding:4px 8px;">▼</button>
+              <button type="button" class="btn btn-sm btn-ghost" data-tirar="${esc(m.nome)}" title="Tirar deste campo" style="color:var(--danger);padding:4px 8px;">✕</button>`
+            : `<span class="field-hint" style="margin:0;">${m.numeroLinhas?fmtInt(m.numeroLinhas)+' linhas':''}</span>`}
+          </div>
+          ${campoEditavel ? `<label class="hstack" style="gap:6px;font-size:12px;color:var(--ink-soft);margin:4px 0 0 42px;">Linhas
+            <input class="cat-linhas" type="number" inputmode="numeric" min="0" step="1" data-catlinhas="${esc(m.id)}" value="${m.numeroLinhas??''}" placeholder="—"></label>` : ''}
         </div>`; }).join('') : `<div class="field-hint" style="padding:8px 0;">Nenhum material neste campo ainda.</div>`}
     </div>
+
     ${campoEditavel ? `
-    <div class="section-title">Adicionar material</div>
-    ${faltando.length ? `<div class="hstack" style="margin-bottom:8px;">
+    <div class="section-title">Inserir material</div>
+    ${faltando.length ? `<div class="field-hint" style="margin:0 0 4px;">Da lista do protocolo:</div>
+      <div class="hstack" style="margin-bottom:8px;gap:6px;">
         <select id="selAddCatalogo" class="grow" style="min-width:0;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;">
-          <option value="">Escolher da lista do protocolo...</option>
-          ${faltando.map(it=>`<option value="${esc(it.nome)}">${it.numero!=null?it.numero+' · ':''}${esc(it.nome)}</option>`).join('')}
+          <option value="">Escolher...</option>
+          ${faltando.map(it=>`<option value="${esc(it.nome)}">${esc(it.nome)}</option>`).join('')}
         </select>
-        <button class="btn btn-sm" type="button" id="btnAddDoCatalogo">Incluir</button>
+        <input id="selAddPos" type="number" inputmode="numeric" min="1" step="1" placeholder="pos." value="${ativos.length+1}" title="Posição no plantio" style="width:60px;flex:none;padding:9px 6px;border:1.5px solid var(--line);border-radius:10px;">
+        <button class="btn btn-sm" type="button" id="btnAddDoCatalogo" style="flex:none;">Incluir</button>
       </div>` : ''}
-    <div class="hstack">
-      <input id="novoCatalogoNumero" type="number" inputmode="numeric" step="1" placeholder="nº" value="${proximoNumeroCatalogo()}" style="width:64px;flex:none;padding:9px 8px;border:1.5px solid var(--line);border-radius:10px;">
-      <input id="novoCatalogoNome" placeholder="Outro material" class="grow" style="min-width:0;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;">
+    <div class="field-hint" style="margin:0 0 4px;">Outro material (fora da lista):</div>
+    <div class="hstack" style="gap:6px;">
+      <input id="novoCatalogoNome" placeholder="Nome do material" class="grow" style="min-width:0;padding:9px 10px;border:1.5px solid var(--line);border-radius:10px;">
+      <input id="novoCatalogoNumero" type="number" inputmode="numeric" min="1" step="1" placeholder="pos." value="${ativos.length+1}" title="Posição no plantio" style="width:60px;flex:none;padding:9px 6px;border:1.5px solid var(--line);border-radius:10px;">
       <button class="btn btn-sm" type="button" id="btnAddCatalogo" style="flex:none;">＋</button>
     </div>
-    <div class="field-hint" style="margin-top:4px;">${protoEditavel?'Um material novo digitado aqui também entra na lista padrão do protocolo.':'Material novo entra só neste campo (a lista padrão é do responsável pelo protocolo).'}</div>` : ''}
+    <div class="field-hint" style="margin-top:4px;">"pos." = posição no plantio. Se já houver material nessa posição, ele e os seguintes descem uma casa. Material de fora entra só neste campo (não muda a lista do protocolo).</div>` : ''}
 
     <details class="cat-det" ${catAberto} id="detCatalogo">
       <summary>⚙️ Lista padrão do protocolo · ${catalogo.length} materiais${STATE.catalogoDono?` · responsável ${esc(STATE.catalogoDono)}`:''}</summary>
-      <div class="field-hint" style="margin:6px 0;">${protoEditavel ? (STATE.catalogoDono?'Você é o responsável — só você altera esta lista e a numeração.':'Sem responsável ainda — quem alterar primeiro passa a ser o responsável.') : 'Só o responsável pelo protocolo altera esta lista.'}</div>
-      ${protoEditavel ? `<button type="button" class="btn btn-sm btn-yellow btn-block" id="btnImportarLista" style="margin-bottom:6px;">📋 Colar lista ou importar planilha</button>` : ''}
-      ${catalogo.map(it=>`
-        <div class="hstack" style="gap:8px;padding:6px 0;border-bottom:1px solid var(--line);">
-          ${protoEditavel ? `<input class="cat-num" type="number" inputmode="numeric" min="0" step="1" data-catnum="${esc(it.nome)}" value="${it.numero??''}" placeholder="nº">` : `<span class="cat-num-ro">${it.numero??'–'}</span>`}
-          <span style="flex:1;font-size:13.5px;">${esc(it.nome)}</span>
-          ${protoEditavel ? `<button type="button" class="btn btn-sm btn-ghost" data-catrm="${esc(it.nome)}" style="color:var(--danger);padding:4px 6px;">✕</button>` : ''}
-        </div>`).join('') || '<div class="field-hint">Lista vazia.</div>'}
+      ${htmlListaProtocolo()}
     </details>
     <button class="btn btn-primary btn-block" style="margin-top:12px;" id="btnFecharSelecao">Concluído</button>
   `, { wide:true });
@@ -3823,50 +4061,51 @@ function abrirModalSelecionarMateriais(campo){
   document.querySelectorAll('[data-tirar]').forEach(b=>b.addEventListener('click', async ()=>{
     await definirStatusMaterialCampo(campoAtual(), b.dataset.tirar, 'excluido'); toast("Tirado deste campo"); reabrir();
   }));
+  document.querySelectorAll('[data-campomv]').forEach(b=>b.addEventListener('click', async ()=>{
+    if(await moverNoCampo(campoAtual(), b.dataset.matid, +b.dataset.campomv)) reabrir();
+  }));
+  const bPT = document.getElementById('btnPreencherTodos');
+  if(bPT) bPT.addEventListener('click', async ()=>{
+    const vals = { linhas:num(document.getElementById('pt_linhas').value), comp:num(document.getElementById('pt_comp').value),
+      esp:num(document.getElementById('pt_esp').value), sem:num(document.getElementById('pt_sem').value) };
+    if(!(vals.linhas>0 || vals.comp>0 || vals.esp>0 || vals.sem>0)){ toast("Preencha pelo menos um valor"); return; }
+    await preencherTodosCampo(campoAtual(), vals);
+    toast("Aplicado a todos os materiais ✓"); reabrir();
+  });
   const bAddCat = document.getElementById('btnAddDoCatalogo');
   if(bAddCat) bAddCat.addEventListener('click', async ()=>{
     const nome = document.getElementById('selAddCatalogo').value;
     if(!nome){ toast("Escolha um material da lista"); return; }
-    await definirStatusMaterialCampo(campoAtual(), nome, 'ok'); toast("Material incluído ✓"); reabrir();
+    if(await inserirMaterialNaPosicao(campoAtual(), nome, num(document.getElementById('selAddPos').value))){ toast("Material incluído ✓"); reabrir(); }
   });
+  document.querySelectorAll('[data-campopos]').forEach(inp=>inp.addEventListener('change', async ()=>{
+    const v = num(inp.value);
+    if(!(v>=1)){ reabrir(); return; }
+    if(await moverParaPosicao(campoAtual(), inp.dataset.campopos, v)){ toast("Posição ajustada ✓"); reabrir(); }
+  }));
+  document.querySelectorAll('[data-camporen]').forEach(b=>b.addEventListener('click', async ()=>{
+    const m = (campoAtual().materiais||[]).find(x=>x.id===b.dataset.camporen); if(!m) return;
+    const novo = prompt(`Novo nome para "${m.nome}" (só neste campo):`, m.nome);
+    if(novo==null) return;
+    if(await renomearMaterialCampo(campoAtual(), m.id, novo)){ toast("Renomeado ✓"); reabrir(); }
+  }));
   const inpNome = document.getElementById('novoCatalogoNome');
   if(inpNome){
     inpNome.addEventListener('keydown', e=>{ if(e.key==='Enter') confirmarAddCatalogo(campoAtual()); });
     document.getElementById('btnAddCatalogo').addEventListener('click', ()=>confirmarAddCatalogo(campoAtual()));
   }
-  document.querySelectorAll('[data-catnum]').forEach(inp=>inp.addEventListener('change', async ()=>{
-    const v = num(inp.value);
-    if(await definirNumeroCatalogo(inp.dataset.catnum, isNaN(v) ? null : Math.round(v))) reabrir();
-  }));
-  document.querySelectorAll('[data-catrm]').forEach(btn=>btn.addEventListener('click', async ()=>{
-    if(!confirm(`Remover "${btn.dataset.catrm}" da lista padrão do protocolo? (Os campos que já têm esse material continuam com ele.)`)) return;
-    if(await removerDoCatalogo(btn.dataset.catrm)){ toast("Removido da lista padrão"); reabrir(); }
-  }));
-  const bImp = document.getElementById('btnImportarLista');
-  if(bImp) bImp.addEventListener('click', ()=>abrirModalImportarLista(campoAtual()));
+  wireListaProtocolo(reabrir, campoAtual());
   document.getElementById('btnFecharSelecao').addEventListener('click', ()=>{ STATE.modalSelecaoCampoId = null; closeModal(); renderAll(); });
 }
 
 async function confirmarAddCatalogo(campo){
   const nome = document.getElementById('novoCatalogoNome').value.trim();
-  const numero = num(document.getElementById('novoCatalogoNumero').value);
+  const pos = num(document.getElementById('novoCatalogoNumero').value);
   if(!nome){ toast("Digite o nome do material"); return; }
-  const c = STATE.campos.find(x=>x.id===campo.id) || campo;
-  if(materiaisAtivos(c).some(m=>normNome(m.nome)===normNome(nome))){ toast("Esse material já está neste campo"); return; }
-  const noCatalogo = (STATE.catalogoItens||[]).some(i=>normNome(i.nome)===normNome(nome));
-  if(!noCatalogo && podeEditarProtocolo()){
-    await adicionarAoCatalogo(nome, isNaN(numero)?null:Math.round(numero));
-    await definirStatusMaterialCampo(STATE.campos.find(x=>x.id===campo.id)||c, nome, 'ok');
-  } else if(!noCatalogo){
-    // não é o responsável: entra só neste campo, com o número digitado
-    const mats = (c.materiais||[]).filter(m=>normNome(m.nome)!==normNome(nome))
-      .concat([novoMaterialObj(c, nome, { numero: isNaN(numero)?null:Math.round(numero) })]);
-    await salvarCampo(c.id, { materiais: mats });
-  } else {
-    await definirStatusMaterialCampo(c, nome, 'ok');
-  }
-  toast("Material adicionado ✓");
-  abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id) || c);
+  // entra só neste campo, na posição de plantio digitada (a lista do protocolo não muda)
+  if(!(await inserirMaterialNaPosicao(campo, nome, pos))) return;
+  toast("Material inserido ✓");
+  abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id) || campo);
   const novo = document.getElementById('novoCatalogoNome'); if(novo) novo.focus();
 }
 
@@ -3915,7 +4154,7 @@ function abrirModalImportarLista(campo){
           <span class="cat-num-ro">${it.numero ?? '≈'+(prox++)}</span><span style="flex:1;">${esc(it.nome)}</span>
           ${ja?'<span class="field-hint" style="margin:0;">já na lista</span>':''}
         </label>`; }).join('')}</div>
-      <label class="hstack" style="gap:8px;font-size:13px;margin-top:8px;"><input type="checkbox" id="impIncluirCampo" ${podeEditar(campo)?'checked':'disabled'}> Incluir também neste campo</label>
+      ${campo ? `<label class="hstack" style="gap:8px;font-size:13px;margin-top:8px;"><input type="checkbox" id="impIncluirCampo" ${podeEditar(campo)?'checked':'disabled'}> Incluir também neste campo</label>` : ''}
       <button class="btn btn-primary btn-block" style="margin-top:8px;" id="impConfirmar">Adicionar à lista do protocolo</button>`;
     document.getElementById('impConfirmar').addEventListener('click', async ()=>{
       const marcados = Array.from(document.querySelectorAll('[data-impidx]:checked')).map(el=>itens[+el.dataset.impidx]);
@@ -3925,17 +4164,17 @@ function abrirModalImportarLista(campo){
         .map(it=>({ nome:it.nome, numero: it.numero ?? n++ }));
       const ok = await salvarCatalogo((STATE.catalogoItens||[]).concat(novos));
       if(!ok) return;
-      if(document.getElementById('impIncluirCampo')?.checked){
+      if(campo && document.getElementById('impIncluirCampo')?.checked){
         const c = STATE.campos.find(x=>x.id===campo.id) || campo;
         let mats = (c.materiais||[]).slice();
         marcados.forEach(it=>{
           const idx = mats.findIndex(m=>normNome(m.nome)===normNome(it.nome));
           if(idx===-1) mats.push(novoMaterialObj(c, it.nome)); else mats[idx] = { ...mats[idx], status:'ok' };
         });
-        await salvarCampo(c.id, { materiais:mats });
+        await salvarCampo(c.id, { materiais: comOrdem(c, mats) });
       }
       toast(`${novos.length} material(is) adicionado(s) ✓`);
-      abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id) || campo);
+      if(campo) abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id) || campo); else abrirModalListaProtocolo();
     });
   };
   document.getElementById('impTexto').addEventListener('input', e=>{ itens = interpretarListaMateriais(e.target.value.split(/\r?\n/)); previa(); });
@@ -3957,7 +4196,7 @@ function abrirModalImportarLista(campo){
       if(!itens.length) toast("Não encontrei materiais nesse arquivo");
     }catch(err){ console.error(err); toast("Não foi possível ler o arquivo"); }
   });
-  document.getElementById('impVoltar').addEventListener('click', ()=>abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id)||campo));
+  document.getElementById('impVoltar').addEventListener('click', ()=>campo ? abrirModalSelecionarMateriais(STATE.campos.find(x=>x.id===campo.id)||campo) : abrirModalListaProtocolo());
 }
 
 function novoMaterialObj(campo, nome, extra){
@@ -3972,7 +4211,7 @@ async function definirStatusMaterialCampo(campo, nome, status){
   }else{
     materiais = materiais.map((m,i)=> i===idx ? Object.assign({}, m, { status }) : m);
   }
-  await salvarCampo(campo.id, { materiais });
+  await salvarCampo(campo.id, { materiais: comOrdem(campo, materiais) });
 }
 async function marcarTodosOk(campo){
   if(!podeEditar(campo)){ toast("Sem permissão"); return; }
@@ -3982,7 +4221,7 @@ async function marcarTodosOk(campo){
     if(idx===-1) materiais.push(novoMaterialObj(campo, it.nome));
     else if(materiais[idx].status!=='ok') materiais[idx] = Object.assign({}, materiais[idx], { status:'ok' });
   });
-  await salvarCampo(campo.id, { materiais });
+  await salvarCampo(campo.id, { materiais: comOrdem(campo, materiais) });
 }
 
 /* ---------- Campo de DIFUSÃO: material livre (fora do protocolo) ---------- */
@@ -4560,7 +4799,7 @@ function abrirModalEditarMaterial(campo, mat){
     <h3>✏️ Editar material</h3>
     <p class="field-hint" style="margin-bottom:10px;">${esc(campo.fazenda||'')} · as avaliações já lançadas (estande, notas, colheita, fotos) continuam salvas.</p>
     <div class="grid2">
-      <div class="field"><label>Nº</label><input id="em_num" type="number" inputmode="numeric" step="1" value="${nAtual??''}"></div>
+      <div class="field"><label>Nº${ehDifusao(campo)?'':' (ordem no campo)'}</label><input id="em_num" type="number" inputmode="numeric" step="1" value="${nAtual??''}" ${ehDifusao(campo)?'':'readonly style="background:#f1f4f2;"'}></div>
       <div class="field"><label>Linhas plantadas</label><input id="em_linhas" type="number" inputmode="numeric" step="1" value="${mat.numeroLinhas??''}"></div>
     </div>
     <div class="field"><label>Nome do material</label><input id="em_nome" value="${esc(mat.nome||'')}"></div>
@@ -4597,9 +4836,8 @@ function abrirModalEditarMaterial(campo, mat){
     };
     // nº: no protocolo vem da lista padrão pelo nome; se o nome não estiver na
     // lista (ou o nº digitado for diferente), guarda o nº no próprio material
-    const nCat = ehDifusao(c) ? null : numeroCatalogo(nome);
-    const nNovo = isNaN(numDig) ? null : Math.round(numDig);
-    if(ehDifusao(c) || nCat==null || (nNovo!=null && nNovo!==nCat)) patch.numero = nNovo;
+    // nº: no campo de difusão é digitado; no protocolo é a ordem de plantio (▲ ▼ em Materiais do campo)
+    if(ehDifusao(c)) patch.numero = isNaN(numDig) ? null : Math.round(numDig);
     await salvarMaterial(c, mat.id, patch);
     closeModal();
     toast("Material atualizado ✓");
@@ -6092,6 +6330,12 @@ function abrirModalRelatorioCampo(campo){
         <span>Incluir campo de assinatura do produtor autorizando a divulgação do resultado (conforme a LGPD)</span>
       </label>
     </div>
+    <div class="field">
+      <label class="hstack" style="gap:8px;font-size:13px;align-items:flex-start;">
+        <input type="checkbox" id="rc_fotos" checked style="margin-top:3px;">
+        <span>Incluir as fotos dos materiais (estande, engalhamento, sanidade e colheita)</span>
+      </label>
+    </div>
     <button class="btn btn-primary btn-block" id="btnGerarRelatorioCampo">Gerar PDF</button>
     <button class="btn btn-block" style="margin-top:8px;" id="btnFecharRelatorioCampo">Fechar</button>
   `);
@@ -6104,15 +6348,63 @@ function abrirModalRelatorioCampo(campo){
     else chkAssinatura.checked = true;
   });
   document.getElementById('btnGerarRelatorioCampo').addEventListener('click', ()=>{
-    gerarRelatorioCampoPDF(campo, {
-      somenteTabela: chkSomente.checked,
-      incluirAssinatura: chkAssinatura.checked && !chkSomente.checked
-    });
+    const incluirFotos = document.getElementById('rc_fotos').checked;
     closeModal();
+    if(incluirFotos) toast("Montando o PDF com as fotos...");
+    gerarRelatorioCampoPDF(STATE.campos.find(c=>c.id===campo.id)||campo, {
+      somenteTabela: chkSomente.checked,
+      incluirAssinatura: chkAssinatura.checked && !chkSomente.checked,
+      incluirFotos
+    });
   });
 }
 
-function gerarRelatorioCampoPDF(campo, opts){
+// fotos de um material para o PDF: as das avaliações (todas as etapas) + as de sanidade
+async function fotosDoMaterialPDF(campo, mat){
+  const out = [];
+  (await listarFotosAvaliacao(campo.id, mat.id)).forEach(f=>out.push({ b64:f.base64, legenda:`${ETAPA_FOTO_LABEL[f.etapa]||f.etapa}${f.criadoEm?' · '+fmtDate(f.criadoEm.slice(0,10)):''}` }));
+  const sa = mat.sanidadeAltura||{};
+  const dataSan = sa.data ? ' · '+fmtDate(sa.data) : '';
+  for(const ref of (sa.fotos||[])){ const b = await buscarFotoBase64(ref); if(b) out.push({ b64:b, legenda:'Sanidade'+dataSan }); }
+  for(const d of (sa.diagnosticos||[])){ if(!d.foto) continue; const b = await buscarFotoBase64(d.foto); if(b) out.push({ b64:b, legenda:`Sanidade · ${d.nome||d.item||'ocorrência'}${dataSan}` }); }
+  return out;
+}
+function dimImagem(b64){
+  return new Promise(res=>{ const im = new Image(); im.onload = ()=>res({ w:im.naturalWidth||1, h:im.naturalHeight||1 }); im.onerror = ()=>res(null); im.src = b64; });
+}
+async function paginasFotosPDF(doc, campo){
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const cols = 4, gap = 12, cw = (W - 60 - gap*(cols-1))/cols, ch = 118, rowH = ch + 34;
+  let x = 30, y = 0, col = 0, total = 0, primeira = true;
+  const novaPagina = ()=>{
+    doc.addPage(); y = Y0; col = 0;
+    doc.setFontSize(13); doc.setTextColor(11,89,48); doc.setFont(undefined,'bold');
+    doc.text(`Fotos dos materiais — ${campo.fazenda||''}${primeira?'':' (continuação)'}`, 30, y);
+    doc.setFont(undefined,'normal'); y += 14; primeira = false;
+  };
+  for(const mat of materiaisAtivos(campo)){
+    const fotos = await fotosDoMaterialPDF(campo, mat);
+    for(const f of fotos){
+      if(total===0 || (col===0 && y + rowH > H - 30)) novaPagina();
+      x = 30 + col*(cw+gap);
+      const d = await dimImagem(f.b64);
+      if(d){
+        const esc_ = Math.min(cw/d.w, ch/d.h), iw = d.w*esc_, ih = d.h*esc_;
+        doc.setFillColor(240,244,241); doc.rect(x, y, cw, ch, 'F');
+        try{ doc.addImage(f.b64, 'JPEG', x+(cw-iw)/2, y+(ch-ih)/2, iw, ih); }catch(e){ console.warn('foto no PDF', e); }
+      }
+      doc.setFontSize(8.5); doc.setTextColor(20,20,20); doc.setFont(undefined,'bold');
+      doc.text(doc.splitTextToSize(rotuloMaterial(campo, mat), cw)[0], x, y+ch+11);
+      doc.setFont(undefined,'normal'); doc.setTextColor(90,107,98); doc.setFontSize(7.5);
+      doc.text(doc.splitTextToSize(f.legenda, cw)[0], x, y+ch+21);
+      total++; col++;
+      if(col===cols){ col = 0; y += rowH; }
+    }
+  }
+  return total;
+}
+
+async function gerarRelatorioCampoPDF(campo, opts){
   if(typeof window.jspdf==="undefined"){ toast("Biblioteca de PDF não carregou — verifique sua conexão"); return; }
   opts = opts || {};
   const { jsPDF } = window.jspdf;
@@ -6185,10 +6477,154 @@ function gerarRelatorioCampoPDF(campo, opts){
     doc.text("Data", 400, y+14);
   }
 
+  if(opts.incluirFotos){
+    try{ await paginasFotosPDF(doc, campo); }catch(e){ console.error(e); toast("Algumas fotos não entraram no PDF"); }
+  }
   const nomeArquivo = `resultado_colheita_${(campo.fazenda||'campo').replace(/[^a-z0-9]+/gi,'_')}_${todayISO()}.pdf`;
   rodapePDF(doc);
   doc.save(nomeArquivo);
   toast("Relatório do campo gerado ✓");
+}
+
+/* ---------------------------------------------------------------
+   15b2) RELATÓRIO DA REDE — PDF único com todos os locais (filtros da aba
+   Resultados valem): resumo, gráfico, ranking com Tukey e estabilidade,
+   tabela material × local, locais e metodologia.
+------------------------------------------------------------------*/
+function gerarRelatorioRedePDF(campos, difusao){
+  if(typeof window.jspdf==="undefined"){ toast("Biblioteca de PDF não carregou — verifique sua conexão"); return; }
+  const { tab, locais } = tabelaMatLocal(campos, 'scHa');
+  const stats = statsVar(campos, 'scHa');
+  if(!stats.length){ toast("Nenhuma colheita lançada ainda para o relatório"); return; }
+  const anova = anovaVar(campos, 'scHa');
+  const est = stats.length>=2 ? estabilidadeVar(campos, 'scHa') : null;
+  const cLoc = locais.map(id=>campos.find(c=>c.id===id)).filter(Boolean)
+    .sort((a,b)=>(a.fazenda||'').localeCompare(b.fazenda||'','pt-BR'));
+  const mediaLoc = id => media(Object.keys(tab).map(n=>tab[n][id]).filter(v=>v!=null));
+  const G = media(stats.flatMap(s=>Object.values(tab[s.nome])));
+  const safras = Array.from(new Set(cLoc.map(c=>c.safra||STATE.safraAtual))).join(', ');
+  const consultores = Array.from(new Set(cLoc.map(c=>c.consultor).filter(Boolean))).join(', ');
+  const letra = nome => anova ? (anova.ranking.find(r=>r.nome===nome)?.letra||'') : '';
+  const estDe = nome => est ? est.resultado.find(r=>r.nome===nome) : null;
+  const mediaVar = (nome, key)=>{ const t = tabelaMatLocal(campos, key).tab[nome]; return t ? media(Object.values(t)) : NaN; };
+  const numCat = nome => { const n = numeroCatalogo(nome); return n!=null ? n+' · ' : ''; };
+  const curto = (t, n)=> { t = String(t||''); return t.length>n ? t.slice(0,n-1)+'…' : t; };
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation:"landscape", unit:"pt" });
+  const W = doc.internal.pageSize.getWidth(), H = doc.internal.pageSize.getHeight();
+  const verde=[11,89,48], verdeClaro=[231,247,239], amarelo=[252,226,59], cinza=[90,107,98];
+  const titulo = (t, y)=>{ doc.setFontSize(13); doc.setTextColor(...verde); doc.setFont(undefined,'bold'); doc.text(t, 30, y); doc.setFont(undefined,'normal'); };
+
+  // ---- página 1: resumo + gráfico
+  doc.setFontSize(17); doc.setTextColor(...verde); doc.setFont(undefined,'bold');
+  doc.text(`Relatório da rede — ${difusao?'Campos de difusão':'Protocolo Urtigão'} · Safra ${safras}`, 30, Y0);
+  doc.setFont(undefined,'normal'); doc.setFontSize(9.5); doc.setTextColor(...cinza);
+  doc.text(`${cLoc.length} local(is) colhido(s) · ${stats.length} materiais · Consultores: ${consultores||'—'}`, 30, Y0+16);
+  const filtros = Object.entries(STATE.filtro||{}).filter(([k,v])=>v).map(([k,v])=>`${k}: ${v}`).join(' · ');
+  if(filtros) doc.text(`Filtros aplicados: ${filtros}`, 30, Y0+28);
+  // cartões
+  const cards = [
+    [fmt(G,1)+' sc/ha','Média geral'],
+    [stats[0] ? fmt(stats[0].media,1)+' sc/ha' : '—', 'Maior média: '+curto(stats[0]?.nome,22)],
+    [anova && !isNaN(anova.cvExp) ? fmt(anova.cvExp,1)+'%' : '—', 'CV experimental'],
+    [anova ? (anova.p<0.05 ? 'Sim (p '+fmtP(anova.p)+')' : 'Não (p '+fmtP(anova.p)+')') : '—', 'Diferença entre materiais (5%)']
+  ];
+  const cw = (W-60-3*10)/4;
+  cards.forEach((c,i)=>{
+    const x = 30 + i*(cw+10), y = Y0+40;
+    doc.setFillColor(...verdeClaro); doc.roundedRect(x, y, cw, 46, 6, 6, 'F');
+    doc.setFontSize(14); doc.setTextColor(...verde); doc.setFont(undefined,'bold'); doc.text(c[0], x+10, y+20);
+    doc.setFont(undefined,'normal'); doc.setFontSize(8.5); doc.setTextColor(...cinza); doc.text(c[1], x+10, y+36);
+  });
+  // gráfico de barras horizontais
+  let gy = Y0+108;
+  titulo('Produtividade média por material (sc/ha) — letras iguais não diferem pelo Tukey 5%', gy); gy += 10;
+  const disp = H - 30 - gy, n = stats.length;
+  const bh = Math.max(7, Math.min(16, disp/n - 3)), passo = bh + Math.min(4, Math.max(2, disp/n - bh));
+  const xNome = 30, xBar = 210, wBar = W - 30 - xBar - 90;
+  const maxV = Math.max(...stats.map(s=>s.media)) || 1;
+  doc.setFontSize(Math.min(9, bh*0.75));
+  stats.forEach((s,i)=>{
+    const y = gy + 6 + i*passo;
+    if(y + bh > H - 26) return;
+    doc.setTextColor(30,30,30); doc.text(curto(`${i+1}º ${numCat(s.nome)}${s.nome}`, 38), xNome, y + bh*0.75);
+    const w = Math.max(2, s.media/maxV*wBar);
+    if(i<3) doc.setFillColor(...verde); else if(s.media>=G) doc.setFillColor(92,170,120); else doc.setFillColor(190,200,194);
+    doc.rect(xBar, y, w, bh, 'F');
+    doc.setTextColor(30,30,30); doc.text(`${fmt(s.media,1)}  ${letra(s.nome)}`, xBar + w + 5, y + bh*0.75);
+  });
+  // linha da média geral
+  const xm = xBar + G/maxV*wBar;
+  doc.setDrawColor(200,60,60); doc.setLineDashPattern([3,2],0); doc.line(xm, gy+2, xm, Math.min(H-26, gy+6+n*passo)); doc.setLineDashPattern([],0);
+  doc.setFontSize(7.5); doc.setTextColor(200,60,60); doc.text(`média ${fmt(G,1)}`, xm+3, gy+4);
+
+  // ---- página 2: ranking completo
+  doc.addPage();
+  titulo('Ranking geral — produtividade e demais características', Y0);
+  const temEst = !!est;
+  const head = ['Pos','Material','Média sc/ha','Tukey','% da média','Locais','Mín','Máx','PMS (g)','Ciclo (dias)'].concat(temEst?['Wi (75%)','b']:[]);
+  const body = stats.map((s,i)=>{
+    const e = estDe(s.nome);
+    return [i+1, numCat(s.nome)+s.nome, fmt(s.media,1), letra(s.nome)||'—', fmt(s.media/G*100,0)+'%', s.n, fmt(s.min,1), fmt(s.max,1),
+      fmtVar(mediaVar(s.nome,'pms'),'pms'), fmtVar(mediaVar(s.nome,'ciclo'),'ciclo')]
+      .concat(temEst ? [e ? fmt(e.wi,1) : '—', e && !isNaN(e.b) ? fmt(e.b,2) : '—'] : []);
+  });
+  doc.autoTable({ head:[head], body, startY:Y0+10, margin:MARGEM_PDF,
+    styles:{ fontSize:8.5, cellPadding:3.5 }, headStyles:{ fillColor:verde, textColor:255 },
+    alternateRowStyles:{ fillColor:verdeClaro },
+    didParseCell: d=>{ if(d.section==='body' && d.row.index<3) d.cell.styles.fontStyle='bold'; } });
+  let y2 = doc.lastAutoTable.finalY + 16;
+  doc.setFontSize(8.5); doc.setTextColor(...cinza);
+  const notas = [];
+  if(anova) notas.push(`ANOVA ${anova.modelo==='blocos'?'em blocos (cada local = um bloco)':'simples (nem todos os materiais estão em todos os locais)'}: F = ${fmt(anova.F,2)}, p = ${fmtP(anova.p)}, CV = ${fmt(anova.cvExp,1)}%. Médias seguidas da mesma letra não diferem entre si pelo teste de Tukey a 5%.`);
+  if(temEst) notas.push(`Estabilidade em ${est.ambientes} locais: Wi (Annicchiarico, 75% de confiança) = desempenho relativo à média do local que se espera atingir em 3 de cada 4 ambientes (acima de 100 = acima da média); b (Eberhart & Russell) ≈ 1 adaptação ampla, > 1 responde a ambientes bons, < 1 mais rústico.`);
+  const fora = campos.flatMap(c=>materiaisAtivos(c).filter(m=>m.foraEstatistica).map(m=>`${m.nome} em ${c.fazenda||'—'}${m.motivoForaEstat?` (${m.motivoForaEstat})`:''}`));
+  if(fora.length) notas.push(`Fora da estatística: ${fora.join('; ')}.`);
+  notas.forEach(t=>{ const l = doc.splitTextToSize(t, W-60); if(y2 + l.length*11 > H-30){ doc.addPage(); y2 = Y0; } doc.text(l, 30, y2); y2 += l.length*11 + 6; });
+
+  // ---- página 3: material × local
+  doc.addPage();
+  titulo('Produtividade por local (sc/ha)', Y0);
+  const POR_PAG = 9;
+  for(let ini=0; ini<cLoc.length; ini+=POR_PAG){
+    const grupo = cLoc.slice(ini, ini+POR_PAG);
+    if(ini>0) doc.addPage();
+    const headL = ['Material'].concat(grupo.map(c=>curto(c.fazenda||'—',16))).concat(ini+POR_PAG>=cLoc.length?['Média']:[]);
+    const bodyL = stats.map(s=>[curto(numCat(s.nome)+s.nome,28)].concat(grupo.map(c=>{ const v = tab[s.nome][c.id]; return v!=null ? fmt(v,1) : '—'; }))
+      .concat(ini+POR_PAG>=cLoc.length?[fmt(s.media,1)]:[]));
+    bodyL.push(['Média do local'].concat(grupo.map(c=>fmt(mediaLoc(c.id),1))).concat(ini+POR_PAG>=cLoc.length?[fmt(G,1)]:[]));
+    doc.autoTable({ head:[headL], body:bodyL, startY:(ini>0?Y0:Y0+10), margin:MARGEM_PDF,
+      styles:{ fontSize:cLoc.length>6?7.5:8.5, cellPadding:3, halign:'center' }, columnStyles:{ 0:{ halign:'left' } },
+      headStyles:{ fillColor:verde, textColor:255 }, alternateRowStyles:{ fillColor:verdeClaro },
+      didParseCell: d=>{
+        if(d.section==='body' && d.row.index===bodyL.length-1){ d.cell.styles.fontStyle='bold'; d.cell.styles.fillColor=[252,243,190]; }
+        // destaca o melhor material de cada local
+        if(d.section==='body' && d.column.index>0 && d.column.index<=grupo.length && d.row.index<stats.length){
+          const c = grupo[d.column.index-1], vals = stats.map(s=>tab[s.nome][c.id]).filter(v=>v!=null);
+          if(vals.length && tab[stats[d.row.index].nome][c.id]===Math.max(...vals)){ d.cell.styles.fontStyle='bold'; d.cell.styles.textColor=verde; }
+        }
+      } });
+  }
+
+  // ---- página 4: locais
+  doc.addPage();
+  titulo('Locais da rede', Y0);
+  doc.autoTable({ head:[['Fazenda','Produtor','Consultor','Plantio','Potencial','Chuva (mm)','Materiais','Média sc/ha','Melhor material']],
+    body: cLoc.map(c=>{
+      const melhor = stats.map(s=>({ nome:s.nome, v:tab[s.nome][c.id] })).filter(x=>x.v!=null).sort((a,b)=>b.v-a.v)[0];
+      const ch = totalChuva(c);
+      return [c.fazenda||'—', c.produtor||'—', c.consultor||'—', c.dataPlantio?fmtDate(c.dataPlantio):'—', labelPotencialProdutivo(c.potencialProdutivo)||'—',
+        ch>0?fmt(ch,0):'—', stats.filter(s=>tab[s.nome][c.id]!=null).length, fmt(mediaLoc(c.id),1), melhor ? `${melhor.nome} (${fmt(melhor.v,1)})` : '—'];
+    }),
+    startY:Y0+10, margin:MARGEM_PDF, styles:{ fontSize:8.5, cellPadding:3.5 }, headStyles:{ fillColor:verde, textColor:255 }, alternateRowStyles:{ fillColor:verdeClaro } });
+  let y4 = doc.lastAutoTable.finalY + 18;
+  if(y4 > H-80){ doc.addPage(); y4 = Y0; }
+  doc.setFontSize(8.5); doc.setTextColor(...cinza);
+  doc.text(doc.splitTextToSize(`Metodologia: produtividade corrigida conforme o método escolhido na colheita (padrão ${UMIDADE_BASE_PADRAO}% de umidade) e calculada sobre a área colhida de cada parcela. Materiais marcados como "fora da estatística" não entram nas médias, no Tukey nem na estabilidade. Relatório gerado pelo app Urtigão no Campo.`, W-60), 30, y4);
+
+  rodapePDF(doc);
+  doc.save(`relatorio_rede_${(safras||'safra').replace(/[^0-9a-z]+/gi,'-')}_${todayISO()}.pdf`);
+  toast("Relatório da rede gerado ✓");
 }
 
 /* ---------------------------------------------------------------
